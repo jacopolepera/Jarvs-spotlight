@@ -1,0 +1,7 @@
+open-interpreter==0.4.3
+PyQt6>=6.6.1
+keyboard>=0.13.5
+python-dotenv>=1.0.0
+markdown>=3.5.0
+pytest>=7.0.0
+pytest-qt>=4.0.0
