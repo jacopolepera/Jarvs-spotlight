@@ -1,6 +1,5 @@
 {
     "theme": "Dark",
-    "api_key": "",
     "workspace_path": "C:\\Users\\jacop\\Documents\\Jarvs\\workspace",
     "model": "gemini/gemini-2.5-flash"
 }

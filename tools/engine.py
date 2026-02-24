@@ -51,7 +51,7 @@ def setup_interpreter():
     api_key = settings.get_api_key()
     if not api_key or api_key == "inserisci_qui_la_tua_chiave":
         raise ValueError(
-            "CRITICAL: GEMINI_API_KEY not found or not set in settings.\n"
+            "CRITICAL: GEMINI_API_KEY not found or not set in .env.\n"
             "Please open the Settings menu and set your real API key."
         )
 

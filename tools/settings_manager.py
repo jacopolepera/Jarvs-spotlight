@@ -10,21 +10,9 @@ class SettingsManager:
         self.default_workspace = os.path.join(self.root_dir, "workspace")
         self.settings = self._load_settings()
 
-    def _get_env_api_key(self):
-        """Fallback to the .env file if it exists and a JSON key hasn't been set."""
-        from dotenv import load_dotenv
-        env_path = os.path.join(self.root_dir, ".env")
-        if os.path.exists(env_path):
-            load_dotenv(dotenv_path=env_path)
-            key = os.getenv("GEMINI_API_KEY")
-            if key and key != "inserisci_qui_la_tua_chiave":
-                return key
-        return ""
-
     def _load_settings(self):
         default_settings = {
             "theme": "AI Vaporwave",
-            "api_key": self._get_env_api_key(),
             "workspace_path": self.default_workspace,
             "model": "gemini/gemini-2.5-flash"
         }
@@ -51,24 +39,31 @@ class SettingsManager:
         except Exception as e:
             print(f"Failed to save settings: {e}")
 
-    def save_settings(self, theme, api_key, workspace_path, model=None):
+    def save_settings(self, theme, workspace_path, model=None):
         self.settings["theme"] = theme
-        if api_key:
-            self.settings["api_key"] = api_key
         if workspace_path:
             self.settings["workspace_path"] = workspace_path
         if model:
             self.settings["model"] = model
         self._save_raw(self.settings)
 
+    def get_api_key(self):
+        """Strictly loads the API key from the .env file. JSON bypass is removed."""
+        from dotenv import load_dotenv
+        env_path = os.path.join(self.root_dir, ".env")
+        if os.path.exists(env_path):
+            load_dotenv(dotenv_path=env_path, override=True) # Always load latest
+            key = os.getenv("GEMINI_API_KEY")
+            if key and key != "inserisci_qui_la_tua_chiave":
+                return key
+        return ""
+
     def get_theme(self):
         return self.settings.get("theme", "AI Vaporwave")
-
-    def get_api_key(self):
-        return self.settings.get("api_key", self._get_env_api_key())
 
     def get_workspace_path(self):
         return self.settings.get("workspace_path", self.default_workspace)
 
     def get_model(self):
         return self.settings.get("model", "gemini/gemini-2.5-flash")
+

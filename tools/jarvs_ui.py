@@ -109,7 +109,7 @@ class SettingsDialog(QWidget):
         layout.addWidget(self.model_cb)
 
         # API Key
-        layout.addWidget(QLabel("Gemini / LLM API Key:"))
+        layout.addWidget(QLabel("Gemini / LLM API Key (saved to .env):"))
         self.api_input = QLineEdit()
         self.api_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_input.setText(self.settings.get_api_key())
@@ -150,13 +150,20 @@ class SettingsDialog(QWidget):
         QApplication.quit()
 
     def save_and_close(self):
-        # Save to JSON
+        # Save to JSON (without API key)
         theme = self.theme_cb.currentText()
         api_key = self.api_input.text().strip()
         workspace = self.workspace_input.text().strip()
         model = self.model_cb.currentText().strip()
         
-        self.settings.save_settings(theme, api_key, workspace, model)
+        self.settings.save_settings(theme, workspace, model)
+        
+        # Save API key ONLY to .env
+        import os
+        env_path = os.path.join(self.settings.root_dir, ".env")
+        if api_key:
+            with open(env_path, "w", encoding="utf-8") as f:
+                f.write(f"GEMINI_API_KEY={api_key}\n")
         
         # Apply theme instantly
         self.parent_ui.apply_theme(theme)
