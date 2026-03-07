@@ -75,7 +75,35 @@ def setup_interpreter():
     if os.path.exists(history_file):
         try:
             with open(history_file, "r", encoding="utf-8") as f:
-                interpreter.messages = json.load(f)
+                history = json.load(f)
+                
+            # Filter out massively huge entries (like entire CSV files loaded into a prompt)
+            # that cause the API or open-interpreter to hang on next init over Stream.
+            safe_history = []
+            for msg in history:
+                msg_type = msg.get("type", "message")
+                content = msg.get("content", "")
+                
+                # If an image was carried over from previous session, convert it to a text placeholder
+                # so we don't bleed huge Base64 token counts across sessions or crash the LLM trying to 
+                # decode truncated base64 bytes.
+                if msg_type == "image" or msg.get("format") == "base64.png":
+                    msg["type"] = "message"
+                    msg["format"] = "text"
+                    msg["content"] = "[Image attached in previous session]"
+                    safe_history.append(msg)
+                    continue
+
+                # If a single message is > 10,000 characters, keep only its first 5,000 to save context
+                if isinstance(content, str) and len(content) > 10000:
+                    msg["content"] = content[:5000] + "\n...[Content truncated to save memory]..."
+                safe_history.append(msg)
+                
+            # Only keep the last 15 messages so that context window is respected
+            if len(safe_history) > 15:
+                safe_history = safe_history[-15:]
+                
+            interpreter.messages = safe_history
         except Exception as e:
             print(f"Warning: Failed to load history.json: {e}")
 
