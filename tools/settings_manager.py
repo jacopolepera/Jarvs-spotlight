@@ -14,19 +14,22 @@ class SettingsManager:
         default_settings = {
             "theme": "AI Vaporwave",
             "workspace_path": self.default_workspace,
-            "model": "gemini/gemini-2.5-flash"
+            "model": "gemini/gemini-2.5-flash",
+            "window_size": [600, 120]
         }
         
         if os.path.exists(self.settings_file):
             try:
                 with open(self.settings_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    # Merge loaded data with defaults to ensure all keys exist
-                    for k, v in data.items():
-                        if v: # Don't overwrite with empty strings
-                            default_settings[k] = v
+                    content = f.read().strip()
+                    if content:
+                        data = json.loads(content)
+                        # Merge loaded data with defaults to ensure all keys exist
+                        for k, v in data.items():
+                            if v: # Don't overwrite with empty strings
+                                default_settings[k] = v
             except Exception as e:
-                print(f"Warning: Failed to load settings.json: {e}")
+                print(f"Warning: Failed to load settings.json: {e}. Reverting to defaults.")
                 
         # Auto-save defaults if file didn't exist or was missing keys
         self._save_raw(default_settings)
@@ -66,4 +69,11 @@ class SettingsManager:
 
     def get_model(self):
         return self.settings.get("model", "gemini/gemini-2.5-flash")
+
+    def get_window_size(self):
+        return self.settings.get("window_size", [600, 120])
+
+    def save_window_size(self, width, height):
+        self.settings["window_size"] = [width, height]
+        self._save_raw(self.settings)
 
