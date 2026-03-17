@@ -2,8 +2,8 @@ import sys
 import threading
 import keyboard
 from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLineEdit, QTextEdit, QMenu, QFileDialog
-from PyQt6.QtCore import Qt, pyqtSignal, QThread, pyqtSlot
-from PyQt6.QtGui import QAction
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, pyqtSlot, QSize
+from PyQt6.QtGui import QAction, QPixmap
 import os
 
 # Ensure the root directory is in sys.path so 'tools' can be imported
@@ -505,8 +505,18 @@ class SpotlightUI(QWidget):
         self.top_bar = QHBoxLayout()
         self.top_bar.setContentsMargins(4, 2, 4, 0)
         
+        # Logo
+        self.logo_label = QLabel()
+        logo_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "ui", "jarvs_logo.ico")
+        if os.path.exists(logo_path):
+            pixmap = QPixmap(logo_path)
+            # Use slightly larger size (22x22) for better clarity in the top bar
+            self.logo_label.setPixmap(pixmap.scaled(22, 22, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            self.logo_label.setStyleSheet("padding-left: 5px;")
+        self.top_bar.addWidget(self.logo_label)
+
         self.title_label = QLabel("Jarvs Spotlight")
-        self.title_label.setStyleSheet("color: #666; font-weight: bold; font-size: 11px; padding: 5px;")
+        self.title_label.setStyleSheet("color: #666; font-weight: bold; font-size: 11px; padding: 5px; padding-left: 2px;")
         self.title_label.setToolTip("Drag here to move the window")
         self.top_bar.addWidget(self.title_label)
         
