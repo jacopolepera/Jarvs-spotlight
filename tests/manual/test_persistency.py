@@ -1,5 +1,5 @@
 import os
-from tools.engine import setup_interpreter
+from core.tools.engine import setup_interpreter
 
 print("Setting up interpreter...")
 ai = setup_interpreter()

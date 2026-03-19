@@ -1,7 +1,7 @@
 import os
 import json
 import time
-from tools.engine import setup_interpreter
+from core.tools.engine import setup_interpreter
 
 print("Preparing workspace for long-term memory test...")
 workspace_dir = os.path.join(os.path.dirname(__file__), "workspace")

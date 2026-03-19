@@ -10,7 +10,7 @@ import base64
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from tools.engine import setup_interpreter
+from core.tools.engine import setup_interpreter
 
 print("Setting up interpreter with vision support...")
 ai = setup_interpreter()

@@ -4,8 +4,8 @@ import sys
 # Add root dir to sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tools.transcriber import transcribe_audio_gemini
-from tools.settings_manager import SettingsManager
+from core.audio.transcriber import transcribe_audio_gemini
+from core.tools.settings_manager import SettingsManager
 
 def test_transcription():
     print("Testing Gemini Audio Transcription...")

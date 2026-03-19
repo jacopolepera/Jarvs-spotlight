@@ -5,7 +5,8 @@ import sys
 # Add root dir to sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tools.voice_recorder import VoiceRecorder
+from core.audio.recorder import VoiceRecorder
+
 
 def test_recorder():
     print("Testing Voice Recorder...")

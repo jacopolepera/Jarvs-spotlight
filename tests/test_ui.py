@@ -35,7 +35,7 @@ def test_noscrollcombobox_ignores_wheel(qtbot):
     NoScrollComboBox.wheelEvent must call event.ignore() and never change
     the selection — prevents QFont::setPointSize <= 0 crashes.
     """
-    from tools.jarvs_ui import NoScrollComboBox
+    from core.ui.components import NoScrollComboBox
 
     combo = NoScrollComboBox()
     combo.addItems(["Option A", "Option B", "Option C"])
@@ -55,7 +55,8 @@ def test_noscrollcombobox_ignores_wheel(qtbot):
 
 def test_settings_dialog_uses_noscroll_comboboxes(qtbot):
     """Both dropdowns in SettingsDialog must be NoScrollComboBox instances."""
-    from tools.jarvs_ui import SettingsDialog, NoScrollComboBox
+    from core.ui.settings_dialog import SettingsDialog
+    from core.ui.components import NoScrollComboBox
 
     dialog = SettingsDialog(parent=None, settings_manager=_mock_settings())
     qtbot.addWidget(dialog)
@@ -68,7 +69,7 @@ def test_settings_dialog_uses_noscroll_comboboxes(qtbot):
 
 def test_settings_dialog_translucent_background(qtbot):
     """WA_TranslucentBackground is required for frameless rounded corners on Windows."""
-    from tools.jarvs_ui import SettingsDialog
+    from core.ui.settings_dialog import SettingsDialog
 
     dialog = SettingsDialog(parent=None, settings_manager=_mock_settings())
     qtbot.addWidget(dialog)
@@ -84,7 +85,7 @@ def test_no_qfont_warnings_on_settings_open(qtbot):
     Root cause was px-based font-size in QSS; fix is to use pt units.
     """
     from PyQt6.QtCore import QtMsgType, qInstallMessageHandler
-    from tools.jarvs_ui import SettingsDialog
+    from core.ui.settings_dialog import SettingsDialog
 
     qfont_warnings = []
 
@@ -113,7 +114,7 @@ def test_chat_input_box_min_height(qtbot):
     ChatInputBox.min_height must be >= 44px so text isn't vertically clipped.
     This is a regression guard for the text-clipping UI bug.
     """
-    from tools.jarvs_ui import ChatInputBox
+    from core.ui.components import ChatInputBox
 
     box = ChatInputBox()
     qtbot.addWidget(box)
@@ -130,7 +131,7 @@ def test_settings_dialog_screenshot(qtbot):
     Renders SettingsDialog and saves a screenshot to .tmp/settings_dialog.png
     for manual visual inspection without running the full app.
     """
-    from tools.jarvs_ui import SettingsDialog
+    from core.ui.settings_dialog import SettingsDialog
 
     dialog = SettingsDialog(parent=None, settings_manager=_mock_settings())
     qtbot.addWidget(dialog)

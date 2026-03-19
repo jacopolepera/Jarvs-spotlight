@@ -5,8 +5,8 @@ import json
 # Add root dir to sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tools.settings_manager import SettingsManager
-from tools.engine import setup_interpreter
+from core.tools.settings_manager import SettingsManager
+from core.tools.engine import setup_interpreter
 
 def test_history_scrub():
     print("Testing Engine History Scrubber...")

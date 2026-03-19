@@ -1,5 +1,5 @@
 import sys
-from tools.engine import setup_interpreter
+from core.tools.engine import setup_interpreter
 
 print("Initializing Jarvs Engine...")
 ai = setup_interpreter()
