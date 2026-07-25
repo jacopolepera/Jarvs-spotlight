@@ -1,4 +1,5 @@
 .env
+user_models.json
 workspace/
 .tmp/
 support/
@@ -9,3 +10,4 @@ __pycache__/
 settings.json
 .venv/
 architecture/
+.continue/

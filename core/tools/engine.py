@@ -54,19 +54,51 @@ def reload_instructions(interpreter_instance, settings):
 
 
 def setup_interpreter():
-    """Phase 2: Link — configure and return the open-interpreter instance."""
-    api_key = settings.get_api_key()
-    if not api_key or api_key == "inserisci_qui_la_tua_chiave":
-        raise ValueError(
-            "CRITICAL: GEMINI_API_KEY not found or not set in .env.\n"
-            "Please open the Settings menu and set your real API key."
-        )
+    """Phase 2: Link — configure and return the open-interpreter instance.
 
-    interpreter.llm.model = settings.get_model()
-    interpreter.llm.api_key = api_key
-    interpreter.llm.supports_vision = True
+    Supports both cloud models (Gemini, GPT, Claude) and local models
+    (LMStudio, Ollama, etc.) via the model registry in user_models.json.
+    """
+    model_config = settings.get_active_model()
+    provider = model_config.get("provider", "cloud")
+    model_string = model_config.get("model_string", "gemini/gemini-2.5-flash")
+
+    if provider == "local":
+        # ── Local model (LMStudio / Ollama / etc.) ────────────────────────
+        api_base = model_config.get("api_base", "http://localhost:1234/v1")
+        api_key = model_config.get("api_key", "lm-studio")
+
+        interpreter.llm.model = model_string
+        interpreter.llm.api_base = api_base
+        interpreter.llm.api_key = api_key or "lm-studio"
+        interpreter.offline = True
+
+        print(f"[Engine] Local model: {model_string} → {api_base}")
+
+    else:
+        # ── Cloud model (Gemini, GPT, Claude, etc.) ───────────────────────
+        api_key = model_config.get("api_key") or settings.get_api_key()
+        if not api_key or api_key == "inserisci_qui_la_tua_chiave":
+            raise ValueError(
+                f"CRITICAL: API key not found for model '{model_config.get('name', model_string)}'.\n"
+                "Please open the Settings menu and set your API key for this model."
+            )
+
+        interpreter.llm.model = model_string
+        interpreter.llm.api_key = api_key
+        interpreter.offline = False
+
+        print(f"[Engine] Cloud model: {model_string}")
+
+    # ── Common configuration ──────────────────────────────────────────────
+    interpreter.llm.supports_vision = model_config.get("supports_vision", True)
     interpreter.auto_run = True
-    
+
+    # Context window override (if specified by user)
+    ctx = model_config.get("context_window")
+    if ctx:
+        interpreter.llm.context_window = ctx
+
     workspace_dir = settings.get_workspace_path()
     os.makedirs(workspace_dir, exist_ok=True)
     
