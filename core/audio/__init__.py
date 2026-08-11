@@ -1,1 +1,1 @@
-# core.audio — Voice recording, speech-to-text, and (future) text-to-speech
+# core.audio — Audio input and speech-to-text support

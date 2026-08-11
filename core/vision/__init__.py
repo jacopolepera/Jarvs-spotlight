@@ -1,1 +1,1 @@
-# core.vision — Screen capture and file attachment management
+# core.vision — Screen-context and attachment support

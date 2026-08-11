@@ -1,22 +1,33 @@
 import os
 import json
 import copy
+import sqlite3
+import threading
+import tempfile
+
+from core.agent.policy import ExecutionPolicy, parse_execution_policy
+from core.agent.egress import CloudWorkspaceEgress
 
 
 class SettingsManager:
     """Manages persistent user settings for Jarvs Spotlight using a local JSON file.
 
     Settings hierarchy:
-        settings.json   — theme, workspace, active model ID, window size (git-tracked)
-        user_models.json — user's personalized model list with API keys (gitignored)
-        models.json      — default model catalog shipped with the repo (git-tracked, no secrets)
+        settings.json    — local theme, workspace, policy, and window settings
+        user_models.json — local model profiles and credentials
+        models.json      — secret-free starter model catalog shipped with the app
+        data/            — local memory, routines, and audit databases
     """
 
-    def __init__(self):
+    def __init__(self, root_dir=None):
         # root_dir = Jarvs/ (three levels up from core/tools/settings_manager.py)
-        self.root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.root_dir = root_dir or os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        self._lock = threading.RLock()
         self.settings_file = os.path.join(self.root_dir, "settings.json")
         self.default_workspace = os.path.join(self.root_dir, "workspace")
+        self.state_dir = os.path.join(self.root_dir, "data")
 
         # Model config files
         self.default_models_file = os.path.join(self.root_dir, "models.json")
@@ -24,15 +35,23 @@ class SettingsManager:
 
         self.settings = self._load_settings()
         self.models_data = self._load_models()
+        self._migrate_workspace_state()
 
     # ── Settings (settings.json) ─────────────────────────────────────────────
 
     def _load_settings(self):
+        loaded_data = None
         default_settings = {
-            "theme": "AI Vaporwave",
+            "theme": "Default",
             "workspace_path": self.default_workspace,
-            "model": "gemini-2.5-flash",  # Now stores model ID, not raw litellm string
-            "window_size": [600, 120]
+            "model": "lmstudio-default",
+            "window_size": [600, 120],
+            # Missing/invalid values fail closed.  A user must explicitly opt
+            # into automatic execution from the settings UI.
+            "execution_policy": ExecutionPolicy.ALWAYS_ASK.value,
+            # Sending local tool output to a cloud model is a distinct user
+            # decision. Missing and invalid values fail closed.
+            "cloud_workspace_egress": CloudWorkspaceEgress.DENY.value,
         }
 
         if os.path.exists(self.settings_file):
@@ -41,42 +60,212 @@ class SettingsManager:
                     content = f.read().strip()
                     if content:
                         data = json.loads(content)
+                        loaded_data = data
                         for k, v in data.items():
-                            if v:
+                            if v is not None:
                                 default_settings[k] = v
+
+                        # One-time migration for experimental builds that used
+                        # a boolean.  The canonical setting is always an enum.
+                        if "execution_policy" not in data and "auto_run" in data:
+                            default_settings["execution_policy"] = (
+                                ExecutionPolicy.AUTO_RUN.value
+                                if data["auto_run"] is True
+                                else ExecutionPolicy.ALWAYS_ASK.value
+                            )
             except Exception as e:
                 print(f"Warning: Failed to load settings.json: {e}. Reverting to defaults.")
 
-        self._save_raw(default_settings)
+        default_settings["execution_policy"] = parse_execution_policy(
+            default_settings.get("execution_policy")
+        ).value
+        try:
+            default_settings["cloud_workspace_egress"] = CloudWorkspaceEgress(
+                default_settings.get("cloud_workspace_egress")
+            ).value
+        except (TypeError, ValueError):
+            default_settings["cloud_workspace_egress"] = CloudWorkspaceEgress.DENY.value
+        default_settings.pop("auto_run", None)
+
+        # Avoid touching the file on every daemon import/start. Persist only a
+        # first-run default or an actual migration/normalization.
+        if loaded_data != default_settings:
+            self._save_raw(default_settings)
         return default_settings
 
     def _save_raw(self, data):
+        with self._lock:
+            self._write_json_atomic(self.settings_file, data)
+
+    @staticmethod
+    def _write_json_atomic(path, data):
+        """Persist JSON atomically and propagate failures to the caller.
+
+        Security settings must never appear saved only in memory.  The
+        temporary file lives beside the destination so ``os.replace`` stays on
+        the same filesystem and is atomic on supported desktop platforms.
+        """
+
+        directory = os.path.dirname(os.path.abspath(path))
+        os.makedirs(directory, exist_ok=True)
+        temporary_path = None
         try:
-            with open(self.settings_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4)
-        except Exception as e:
-            print(f"Failed to save settings: {e}")
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=directory,
+                prefix=f".{os.path.basename(path)}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary_path = handle.name
+                json.dump(data, handle, indent=4)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+            temporary_path = None
+        finally:
+            if temporary_path is not None:
+                try:
+                    os.remove(temporary_path)
+                except FileNotFoundError:
+                    pass
 
     def save_settings(self, theme, workspace_path, model_id=None):
-        self.settings["theme"] = theme
-        if workspace_path:
-            self.settings["workspace_path"] = workspace_path
-        if model_id:
-            self.settings["model"] = model_id
-        self._save_raw(self.settings)
+        with self._lock:
+            updated = copy.deepcopy(self.settings)
+            updated["theme"] = theme
+            if workspace_path:
+                updated["workspace_path"] = workspace_path
+            if model_id:
+                updated["model"] = model_id
+            self._save_raw(updated)
+            self.settings = updated
 
     def get_theme(self):
-        return self.settings.get("theme", "AI Vaporwave")
+        return self.settings.get("theme", "Default")
 
     def get_workspace_path(self):
         return self.settings.get("workspace_path", self.default_workspace)
+
+    def get_state_dir(self):
+        """Return the application-owned directory for private persistent data."""
+
+        return self.state_dir
+
+    def _migrate_workspace_state(self):
+        """Copy pre-release workspace databases into application-owned state.
+
+        Early development builds stored memory, routines, and audit databases
+        inside ``<workspace>/.jarvs``. Keep the source untouched so migration is
+        recoverable, and record completion only after every available database
+        has been copied successfully.
+        """
+
+        source_dir = os.path.join(self.get_workspace_path(), ".jarvs")
+        marker = os.path.join(self.state_dir, ".workspace-state-migrated")
+        if os.path.exists(marker) or not os.path.isdir(source_dir):
+            return
+
+        database_names = (
+            "personal_memory.sqlite3",
+            "routines.sqlite3",
+            "run_audit.sqlite3",
+        )
+        try:
+            os.makedirs(self.state_dir, exist_ok=True)
+            for name in database_names:
+                source = os.path.join(source_dir, name)
+                destination = os.path.join(self.state_dir, name)
+                if not os.path.isfile(source) or os.path.exists(destination):
+                    continue
+                temporary_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        dir=self.state_dir,
+                        prefix=f".{name}.",
+                        suffix=".migration",
+                        delete=False,
+                    ) as handle:
+                        temporary_path = handle.name
+                    source_connection = sqlite3.connect(source)
+                    destination_connection = sqlite3.connect(temporary_path)
+                    try:
+                        source_connection.backup(destination_connection)
+                    finally:
+                        destination_connection.close()
+                        source_connection.close()
+                    os.replace(temporary_path, destination)
+                    temporary_path = None
+                finally:
+                    if temporary_path is not None:
+                        try:
+                            os.remove(temporary_path)
+                        except FileNotFoundError:
+                            pass
+            with open(marker, "x", encoding="utf-8") as handle:
+                handle.write("1\n")
+        except FileExistsError:
+            return
+        except Exception as exc:
+            print(f"Warning: Failed to migrate local application state: {exc}")
 
     def get_window_size(self):
         return self.settings.get("window_size", [600, 120])
 
     def save_window_size(self, width, height):
-        self.settings["window_size"] = [width, height]
-        self._save_raw(self.settings)
+        with self._lock:
+            updated = copy.deepcopy(self.settings)
+            updated["window_size"] = [width, height]
+            self._save_raw(updated)
+            self.settings = updated
+
+    def get_execution_policy(self):
+        """Return the validated global execution policy."""
+
+        with self._lock:
+            return parse_execution_policy(
+                self.settings.get("execution_policy")
+            ).value
+
+    def set_execution_policy(self, policy):
+        """Validate and persist the global execution policy."""
+
+        try:
+            parsed = ExecutionPolicy(policy)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Unsupported execution policy: {policy!r}") from exc
+        with self._lock:
+            updated = copy.deepcopy(self.settings)
+            updated["execution_policy"] = parsed.value
+            self._save_raw(updated)
+            self.settings = updated
+        return parsed.value
+
+    def get_cloud_workspace_egress(self):
+        """Return the validated workspace-to-cloud egress policy."""
+
+        with self._lock:
+            try:
+                return CloudWorkspaceEgress(
+                    self.settings.get("cloud_workspace_egress")
+                ).value
+            except (TypeError, ValueError):
+                return CloudWorkspaceEgress.DENY.value
+
+    def set_cloud_workspace_egress(self, policy):
+        """Persist an explicit workspace-to-cloud egress decision."""
+
+        try:
+            parsed = CloudWorkspaceEgress(policy)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Unsupported cloud workspace egress policy: {policy!r}") from exc
+        with self._lock:
+            updated = copy.deepcopy(self.settings)
+            updated["cloud_workspace_egress"] = parsed.value
+            self._save_raw(updated)
+            self.settings = updated
+        return parsed.value
 
     # ── Model Registry (user_models.json / models.json) ──────────────────────
 
@@ -120,22 +309,19 @@ class SettingsManager:
 
     def _save_models(self, data=None):
         """Persist the model registry to user_models.json."""
-        if data is None:
-            data = self.models_data
-        try:
-            with open(self.user_models_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4)
-        except Exception as e:
-            print(f"Failed to save user_models.json: {e}")
+        with self._lock:
+            if data is None:
+                data = self.models_data
+            self._write_json_atomic(self.user_models_file, data)
 
     def _read_env_api_key(self):
-        """Read the legacy GEMINI_API_KEY from .env for backward compatibility."""
+        """Read an optional GEMINI_API_KEY from the local environment file."""
         from dotenv import load_dotenv
         env_path = os.path.join(self.root_dir, ".env")
         if os.path.exists(env_path):
             load_dotenv(dotenv_path=env_path, override=True)
             key = os.getenv("GEMINI_API_KEY")
-            if key and key != "inserisci_qui_la_tua_chiave":
+            if key and key != "replace-with-your-api-key":
                 return key
         return ""
 
@@ -143,24 +329,47 @@ class SettingsManager:
 
     def get_models_list(self):
         """Return the full list of model config dicts."""
-        return self.models_data.get("models", [])
+        with self._lock:
+            return copy.deepcopy(self.models_data.get("models", []))
+
+    @staticmethod
+    def redact_model(model):
+        """Return a renderer-safe copy of a model configuration."""
+
+        public = copy.deepcopy(model)
+        api_key = public.pop("api_key", None)
+        public["api_key_configured"] = bool(
+            api_key and api_key != "replace-with-your-api-key"
+        )
+        return public
+
+    def get_public_models_list(self):
+        return [self.redact_model(model) for model in self.get_models_list()]
+
+    def get_public_active_model(self):
+        return self.redact_model(self.get_active_model())
 
     def get_active_model_id(self):
         """Return the active model ID string."""
-        return self.models_data.get("active_model", self.settings.get("model", ""))
+        with self._lock:
+            return self.models_data.get(
+                "active_model",
+                self.settings.get("model", ""),
+            )
 
     def get_active_model(self):
         """Return the full config dict for the active model, or a sensible fallback."""
-        active_id = self.get_active_model_id()
-        models = self.get_models_list()
+        with self._lock:
+            active_id = self.get_active_model_id()
+            models = self.models_data.get("models", [])
 
-        for m in models:
-            if m.get("id") == active_id:
-                return m
+            for model in models:
+                if model.get("id") == active_id:
+                    return copy.deepcopy(model)
 
-        # Fallback: return first model or a hardcoded default
-        if models:
-            return models[0]
+            # Fallback: return first model or a hardcoded default
+            if models:
+                return copy.deepcopy(models[0])
 
         return {
             "id": "gemini-2.5-flash",
@@ -175,56 +384,83 @@ class SettingsManager:
 
     def set_active_model(self, model_id):
         """Set which model is active and persist."""
-        self.models_data["active_model"] = model_id
-        self.settings["model"] = model_id
-        self._save_models()
-        self._save_raw(self.settings)
+        with self._lock:
+            if not any(
+                model.get("id") == model_id
+                for model in self.models_data.get("models", [])
+            ):
+                raise KeyError(f"Unknown model: {model_id}")
+            updated_models = copy.deepcopy(self.models_data)
+            updated_settings = copy.deepcopy(self.settings)
+            updated_models["active_model"] = model_id
+            updated_settings["model"] = model_id
+
+            # Persist the policy-bearing settings snapshot while the same lock
+            # protects every writer. The duplicated model field is retained for
+            # model registry remains authoritative on load.
+            self._save_raw(updated_settings)
+            self._save_models(updated_models)
+            self.settings = updated_settings
+            self.models_data = updated_models
 
     def add_model(self, model_dict):
         """Append a new model to the user registry and persist."""
-        models = self.models_data.setdefault("models", [])
-        # Ensure unique ID
-        existing_ids = {m["id"] for m in models}
-        if model_dict["id"] in existing_ids:
-            # Auto-suffix to avoid collision
-            base_id = model_dict["id"]
-            counter = 2
-            while f"{base_id}-{counter}" in existing_ids:
-                counter += 1
-            model_dict["id"] = f"{base_id}-{counter}"
-        models.append(model_dict)
-        self._save_models()
-        return model_dict["id"]
+        with self._lock:
+            updated = copy.deepcopy(self.models_data)
+            models = updated.setdefault("models", [])
+            candidate = copy.deepcopy(model_dict)
+            # Ensure unique ID
+            existing_ids = {model["id"] for model in models}
+            if candidate["id"] in existing_ids:
+                # Auto-suffix to avoid collision
+                base_id = candidate["id"]
+                counter = 2
+                while f"{base_id}-{counter}" in existing_ids:
+                    counter += 1
+                candidate["id"] = f"{base_id}-{counter}"
+            models.append(candidate)
+            self._save_models(updated)
+            self.models_data = updated
+            return candidate["id"]
 
     def update_model(self, model_id, updates):
         """Update fields of an existing model entry and persist."""
-        for m in self.models_data.get("models", []):
-            if m["id"] == model_id:
-                m.update(updates)
-                self._save_models()
-                return True
+        with self._lock:
+            updated = copy.deepcopy(self.models_data)
+            for model in updated.get("models", []):
+                if model["id"] == model_id:
+                    model.update(copy.deepcopy(updates))
+                    self._save_models(updated)
+                    self.models_data = updated
+                    return True
         return False
 
     def delete_model(self, model_id):
         """Remove a model from the registry. Returns True if found and removed."""
-        models = self.models_data.get("models", [])
-        original_len = len(models)
-        self.models_data["models"] = [m for m in models if m["id"] != model_id]
+        with self._lock:
+            updated_models = copy.deepcopy(self.models_data)
+            models = updated_models.get("models", [])
+            remaining = [model for model in models if model["id"] != model_id]
+            if len(remaining) == len(models):
+                return False
 
-        if len(self.models_data["models"]) < original_len:
-            # If we deleted the active model, switch to first available
-            if self.get_active_model_id() == model_id:
-                remaining = self.models_data["models"]
+            updated_models["models"] = remaining
+            updated_settings = copy.deepcopy(self.settings)
+            active_changed = self.get_active_model_id() == model_id
+            if active_changed:
                 new_active = remaining[0]["id"] if remaining else ""
-                self.models_data["active_model"] = new_active
-                self.settings["model"] = new_active
-                self._save_raw(self.settings)
-            self._save_models()
+                updated_models["active_model"] = new_active
+                updated_settings["model"] = new_active
+                self._save_raw(updated_settings)
+
+            self._save_models(updated_models)
+            self.models_data = updated_models
+            if active_changed:
+                self.settings = updated_settings
             return True
-        return False
 
     def get_model(self):
-        """Backward-compatible: return the litellm model string for the active model."""
+        """Return the provider model identifier for the active profile."""
         active = self.get_active_model()
         return active.get("model_string", "gemini/gemini-2.5-flash")
 
@@ -232,7 +468,26 @@ class SettingsManager:
         """Return the API key for the active model, with .env fallback."""
         active = self.get_active_model()
         key = active.get("api_key", "")
-        if key and key not in ("", "inserisci_qui_la_tua_chiave"):
+        if key and key != "replace-with-your-api-key":
             return key
-        # Legacy fallback
+        # Legacy fallback only for gemini models
+        model_str = active.get("model_string", "")
+        if "gemini" in model_str.lower():
+            return self._read_env_api_key()
+        return ""
+
+    def get_voice_api_key(self):
+        """Return a Gemini key for speech transcription without exposing it."""
+
+        with self._lock:
+            for model in self.models_data.get("models", []):
+                model_string = str(model.get("model_string", "")).lower()
+                key = model.get("api_key", "")
+                if (
+                    "gemini" in model_string
+                    and isinstance(key, str)
+                    and key
+                    and key != "replace-with-your-api-key"
+                ):
+                    return key
         return self._read_env_api_key()

@@ -1,0 +1,42 @@
+{
+  "name": "jarvs-spotlight-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Desktop interface for Jarvs Spotlight",
+  "license": "MIT",
+  "repository": "https://github.com/jacopolepera/Jarvs-spotlight",
+  "type": "module",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "build:desktop": "tauri build --no-bundle",
+    "dev:desktop": "tauri dev",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@tailwindcss/typography": "^0.5.20",
+    "@tauri-apps/api": "^2",
+    "lucide-react": "^1.27.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "autoprefixer": "^10.5.4",
+    "postcss": "^8.5.23",
+    "tailwindcss": "^4.3.3",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4"
+  }
+}

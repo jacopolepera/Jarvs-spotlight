@@ -32,18 +32,8 @@
             "context_window": null
         },
         {
-            "id": "claude-3.5-sonnet",
-            "name": "Claude 3.5 Sonnet",
-            "provider": "cloud",
-            "model_string": "claude-3-5-sonnet",
-            "api_key": "",
-            "api_base": null,
-            "supports_vision": true,
-            "context_window": null
-        },
-        {
             "id": "lmstudio-default",
-            "name": "LMStudio (Local)",
+            "name": "LM Studio (Local)",
             "provider": "local",
             "model_string": "openai/local-model",
             "api_key": "lm-studio",
@@ -52,5 +42,5 @@
             "context_window": 8192
         }
     ],
-    "active_model": "gemini-2.5-flash"
+    "active_model": "lmstudio-default"
 }
