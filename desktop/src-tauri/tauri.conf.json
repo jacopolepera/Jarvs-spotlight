@@ -1,0 +1,55 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Jarvs Spotlight",
+  "version": "0.1.0",
+  "identifier": "com.jarvsspotlight.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Jarvs Spotlight",
+        "width": 600,
+        "height": 120,
+        "minWidth": 300,
+        "minHeight": 120,
+        "decorations": false,
+        "transparent": false,
+        "shadow": true,
+        "maximizable": true,
+        "fullscreen": false,
+        "resizable": true,
+        "alwaysOnTop": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* ws://127.0.0.1:* ws://localhost:*; img-src 'self' asset: http://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": {
+      "../../core/__init__.py": "python/core/__init__.py",
+      "../../core/agent/": "python/core/agent/",
+      "../../core/audio/": "python/core/audio/",
+      "../../core/daemon/": "python/core/daemon/",
+      "../../core/tools/": "python/core/tools/",
+      "../../core/vision/": "python/core/vision/",
+      "../../models.json": "python/models.json",
+      "../../system_prompt.txt": "python/system_prompt.txt"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

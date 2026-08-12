@@ -1,0 +1,635 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@theme {
+  --color-jarvs-bg: #050c12;
+  --color-jarvs-surface: #0a1821;
+  --color-jarvs-surface-hover: #102b38;
+  --color-jarvs-border: rgba(74, 217, 255, 0.18);
+  --color-jarvs-border-strong: rgba(74, 217, 255, 0.34);
+  --color-jarvs-text: #d2f3fb;
+  --color-jarvs-text-muted: rgba(164, 213, 226, 0.58);
+  --color-jarvs-accent: #4ad9ff;
+  --color-jarvs-accent-hover: #7ee5ff;
+  --color-jarvs-accent-glow: rgba(74, 217, 255, 0.18);
+
+  --font-sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+
+  --animate-fade-in: fadeIn 0.2s ease-out forwards;
+  --animate-slide-up: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+
+  @keyframes fadeIn {
+    0% { opacity: 0; }
+    100% { opacity: 1; }
+  }
+
+  @keyframes slideUp {
+    0% { transform: translateY(8px); opacity: 0; }
+    100% { transform: translateY(0); opacity: 1; }
+  }
+}
+
+:root,
+[data-theme="default"] {
+  color-scheme: dark;
+  --color-jarvs-bg: #050c12;
+  --color-jarvs-surface: #0a1821;
+  --color-jarvs-surface-hover: #102b38;
+  --color-jarvs-border: rgba(74, 217, 255, 0.18);
+  --color-jarvs-border-strong: rgba(74, 217, 255, 0.34);
+  --color-jarvs-text: #d2f3fb;
+  --color-jarvs-text-muted: rgba(164, 213, 226, 0.58);
+  --color-jarvs-accent: #4ad9ff;
+  --color-jarvs-accent-hover: #7ee5ff;
+  --color-jarvs-accent-glow: rgba(74, 217, 255, 0.18);
+  --jarvs-accent-contrast: #031116;
+  --jarvs-app-background:
+    radial-gradient(circle at 50% 44%, rgba(28, 163, 204, 0.1), transparent 29%),
+    linear-gradient(rgba(58, 164, 193, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(58, 164, 193, 0.025) 1px, transparent 1px),
+    linear-gradient(155deg, #07131b 0%, #040a0f 62%, #02070b 100%);
+  --jarvs-background-size: auto, 40px 40px, 40px 40px, auto;
+  --jarvs-titlebar-background: linear-gradient(180deg, rgba(16, 45, 59, 0.82), rgba(5, 15, 22, 0.76));
+  --jarvs-user-message: linear-gradient(135deg, rgba(18, 113, 142, 0.34), rgba(8, 54, 72, 0.42));
+  --jarvs-user-message-border: rgba(74, 217, 255, 0.3);
+  --jarvs-panel-background: linear-gradient(180deg, rgba(11, 31, 42, 0.98), rgba(4, 13, 19, 0.99));
+  --jarvs-control-background: rgba(2, 12, 18, 0.72);
+  --jarvs-overlay: rgba(1, 6, 10, 0.74);
+  --jarvs-backdrop-filter: blur(10px);
+  --jarvs-code-background: rgba(1, 8, 12, 0.72);
+  --jarvs-scrollbar: rgba(74, 217, 255, 0.14);
+  --jarvs-scrollbar-hover: rgba(74, 217, 255, 0.28);
+  --jarvs-core-fill: radial-gradient(circle at 38% 30%, rgba(107, 225, 255, 0.32), rgba(17, 92, 119, 0.76));
+  --jarvs-shell-shadow: inset 0 0 0 1px rgba(74, 217, 255, 0.12), inset 0 0 42px rgba(0, 150, 196, 0.035);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --color-jarvs-bg: #111214;
+  --color-jarvs-surface: #1a1c1f;
+  --color-jarvs-surface-hover: #25282c;
+  --color-jarvs-border: rgba(255, 255, 255, 0.085);
+  --color-jarvs-border-strong: rgba(255, 255, 255, 0.16);
+  --color-jarvs-text: #eceef0;
+  --color-jarvs-text-muted: rgba(232, 235, 238, 0.48);
+  --color-jarvs-accent: #8eb8cc;
+  --color-jarvs-accent-hover: #b1cfdd;
+  --color-jarvs-accent-glow: rgba(142, 184, 204, 0.14);
+  --jarvs-accent-contrast: #0d1519;
+  --jarvs-app-background: linear-gradient(160deg, #161719, #0f1012 68%);
+  --jarvs-background-size: auto;
+  --jarvs-titlebar-background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent);
+  --jarvs-user-message: linear-gradient(135deg, rgba(126, 165, 185, 0.17), rgba(126, 165, 185, 0.08));
+  --jarvs-user-message-border: rgba(142, 184, 204, 0.22);
+  --jarvs-panel-background: linear-gradient(180deg, #202226, #161719);
+  --jarvs-control-background: rgba(0, 0, 0, 0.3);
+  --jarvs-overlay: rgba(0, 0, 0, 0.64);
+  --jarvs-backdrop-filter: blur(8px);
+  --jarvs-code-background: rgba(0, 0, 0, 0.38);
+  --jarvs-scrollbar: rgba(255, 255, 255, 0.09);
+  --jarvs-scrollbar-hover: rgba(255, 255, 255, 0.17);
+  --jarvs-core-fill: radial-gradient(circle at 38% 30%, rgba(190, 219, 232, 0.24), rgba(68, 91, 102, 0.74));
+  --jarvs-shell-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.055);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --color-jarvs-bg: #eef3f6;
+  --color-jarvs-surface: #ffffff;
+  --color-jarvs-surface-hover: #e3edf2;
+  --color-jarvs-border: rgba(21, 74, 99, 0.14);
+  --color-jarvs-border-strong: rgba(21, 74, 99, 0.24);
+  --color-jarvs-text: #152630;
+  --color-jarvs-text-muted: rgba(21, 38, 48, 0.56);
+  --color-jarvs-accent: #007fa6;
+  --color-jarvs-accent-hover: #006985;
+  --color-jarvs-accent-glow: rgba(0, 127, 166, 0.14);
+  --jarvs-accent-contrast: #ffffff;
+  --jarvs-app-background:
+    linear-gradient(rgba(19, 104, 132, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(19, 104, 132, 0.025) 1px, transparent 1px),
+    linear-gradient(155deg, #f8fbfc, #eaf1f4 72%);
+  --jarvs-background-size: 44px 44px, 44px 44px, auto;
+  --jarvs-titlebar-background: linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(232, 241, 245, 0.78));
+  --jarvs-user-message: linear-gradient(135deg, #d8f0f7, #e8f6fa);
+  --jarvs-user-message-border: rgba(0, 127, 166, 0.2);
+  --jarvs-panel-background: linear-gradient(180deg, #ffffff, #f1f6f8);
+  --jarvs-control-background: rgba(255, 255, 255, 0.88);
+  --jarvs-overlay: rgba(24, 42, 52, 0.38);
+  --jarvs-backdrop-filter: blur(7px);
+  --jarvs-code-background: #e8f0f3;
+  --jarvs-scrollbar: rgba(21, 74, 99, 0.15);
+  --jarvs-scrollbar-hover: rgba(21, 74, 99, 0.28);
+  --jarvs-core-fill: radial-gradient(circle at 38% 30%, rgba(104, 213, 238, 0.75), rgba(0, 114, 151, 0.86));
+  --jarvs-shell-shadow: inset 0 0 0 1px rgba(21, 74, 99, 0.1);
+}
+
+[data-theme="glassy"] {
+  color-scheme: dark;
+  --color-jarvs-bg: rgba(9, 15, 26, 0.92);
+  --color-jarvs-surface: rgba(27, 43, 61, 0.58);
+  --color-jarvs-surface-hover: rgba(73, 102, 132, 0.32);
+  --color-jarvs-border: rgba(151, 190, 226, 0.18);
+  --color-jarvs-border-strong: rgba(151, 190, 226, 0.34);
+  --color-jarvs-text: #e2edf8;
+  --color-jarvs-text-muted: rgba(210, 226, 242, 0.56);
+  --color-jarvs-accent: #8ec5ff;
+  --color-jarvs-accent-hover: #b3d9ff;
+  --color-jarvs-accent-glow: rgba(142, 197, 255, 0.2);
+  --jarvs-accent-contrast: #07131e;
+  --jarvs-app-background:
+    radial-gradient(circle at 12% 6%, rgba(107, 150, 204, 0.25), transparent 42%),
+    radial-gradient(circle at 88% 100%, rgba(84, 106, 164, 0.2), transparent 45%),
+    linear-gradient(140deg, rgba(25, 40, 59, 0.94), rgba(7, 13, 23, 0.96));
+  --jarvs-background-size: auto;
+  --jarvs-titlebar-background: linear-gradient(180deg, rgba(184, 213, 242, 0.1), rgba(30, 47, 66, 0.08));
+  --jarvs-user-message: linear-gradient(135deg, rgba(129, 183, 237, 0.22), rgba(67, 102, 148, 0.18));
+  --jarvs-user-message-border: rgba(151, 204, 255, 0.27);
+  --jarvs-panel-background: linear-gradient(160deg, rgba(37, 55, 76, 0.88), rgba(12, 22, 36, 0.92));
+  --jarvs-control-background: rgba(4, 12, 23, 0.38);
+  --jarvs-overlay: rgba(5, 10, 19, 0.56);
+  --jarvs-backdrop-filter: blur(16px) saturate(125%);
+  --jarvs-code-background: rgba(4, 10, 20, 0.46);
+  --jarvs-scrollbar: rgba(174, 208, 240, 0.14);
+  --jarvs-scrollbar-hover: rgba(174, 208, 240, 0.28);
+  --jarvs-core-fill: radial-gradient(circle at 38% 30%, rgba(192, 224, 255, 0.35), rgba(68, 115, 165, 0.72));
+  --jarvs-shell-shadow: inset 0 0 0 1px rgba(184, 217, 248, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+[data-theme="vaporwave"] {
+  color-scheme: dark;
+  --color-jarvs-bg: #120d1d;
+  --color-jarvs-surface: #20162d;
+  --color-jarvs-surface-hover: #30203f;
+  --color-jarvs-border: rgba(180, 119, 255, 0.16);
+  --color-jarvs-border-strong: rgba(203, 140, 255, 0.32);
+  --color-jarvs-text: #f2eaff;
+  --color-jarvs-text-muted: rgba(235, 215, 255, 0.55);
+  --color-jarvs-accent: #b88aff;
+  --color-jarvs-accent-hover: #d0adff;
+  --color-jarvs-accent-glow: rgba(184, 138, 255, 0.2);
+  --jarvs-accent-contrast: #170d20;
+  --jarvs-app-background:
+    radial-gradient(circle at 6% 0%, rgba(57, 164, 255, 0.18), transparent 37%),
+    radial-gradient(circle at 100% 100%, rgba(255, 91, 151, 0.17), transparent 42%),
+    linear-gradient(145deg, #171022, #100c18 58%, #190f20);
+  --jarvs-background-size: auto;
+  --jarvs-titlebar-background: linear-gradient(90deg, rgba(77, 158, 255, 0.09), rgba(151, 78, 255, 0.1), rgba(255, 92, 151, 0.09));
+  --jarvs-user-message: linear-gradient(135deg, rgba(82, 156, 255, 0.2), rgba(178, 91, 255, 0.18), rgba(255, 92, 151, 0.16));
+  --jarvs-user-message-border: rgba(194, 123, 255, 0.27);
+  --jarvs-panel-background: linear-gradient(145deg, rgba(36, 23, 51, 0.98), rgba(20, 14, 29, 0.99));
+  --jarvs-control-background: rgba(10, 6, 18, 0.48);
+  --jarvs-overlay: rgba(9, 5, 15, 0.7);
+  --jarvs-backdrop-filter: blur(11px);
+  --jarvs-code-background: rgba(8, 5, 14, 0.58);
+  --jarvs-scrollbar: rgba(199, 133, 255, 0.14);
+  --jarvs-scrollbar-hover: rgba(255, 117, 180, 0.25);
+  --jarvs-core-fill: radial-gradient(circle at 35% 28%, rgba(103, 188, 255, 0.5), rgba(142, 66, 205, 0.76) 58%, rgba(236, 76, 142, 0.65));
+  --jarvs-shell-shadow: inset 0 0 0 1px rgba(182, 117, 255, 0.12), inset 0 0 46px rgba(139, 67, 214, 0.045);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    width: 100%;
+    height: 100%;
+  }
+
+  body {
+    @apply text-jarvs-text m-0 overflow-hidden font-sans antialiased;
+    background: var(--jarvs-app-background);
+  }
+
+  ::selection {
+    color: var(--color-jarvs-text);
+    background: var(--color-jarvs-accent-glow);
+  }
+}
+
+.app-shell {
+  background: var(--jarvs-app-background);
+  background-size: var(--jarvs-background-size);
+  box-shadow: var(--jarvs-shell-shadow);
+  transition: background 180ms ease, color 180ms ease, box-shadow 180ms ease;
+}
+
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--jarvs-scrollbar);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--jarvs-scrollbar-hover);
+}
+
+.titlebar {
+  background: var(--jarvs-titlebar-background);
+  border-bottom: 1px solid var(--color-jarvs-border);
+  box-shadow: 0 1px 18px rgba(0, 0, 0, 0.08);
+}
+
+.brand-logo {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+  filter: drop-shadow(0 0 6px var(--color-jarvs-accent-glow));
+}
+
+.app-shell[data-window-mode="compact"] .chat-history,
+.app-shell[data-window-mode="compactTall"] .chat-history {
+  display: none;
+}
+
+.brand-mark {
+  color: var(--color-jarvs-accent);
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.16em;
+  text-shadow: 0 0 13px var(--color-jarvs-accent-glow);
+}
+
+.version-badge {
+  padding: 1px 5px;
+  border: 1px solid var(--color-jarvs-border);
+  border-radius: 999px;
+  letter-spacing: 0.08em;
+}
+
+.input-glow:focus-within {
+  border-color: var(--color-jarvs-accent);
+  box-shadow: 0 0 0 1px var(--color-jarvs-accent-glow), 0 0 22px var(--color-jarvs-accent-glow);
+}
+
+.msg-user {
+  background: var(--jarvs-user-message);
+  border: 1px solid var(--jarvs-user-message-border);
+}
+
+.msg-assistant {
+  background: var(--color-jarvs-surface);
+  border: 1px solid var(--color-jarvs-border);
+}
+
+.message-markdown {
+  --tw-prose-body: var(--color-jarvs-text);
+  --tw-prose-headings: var(--color-jarvs-text);
+  --tw-prose-lead: var(--color-jarvs-text-muted);
+  --tw-prose-links: var(--color-jarvs-accent);
+  --tw-prose-bold: var(--color-jarvs-text);
+  --tw-prose-counters: var(--color-jarvs-text-muted);
+  --tw-prose-bullets: var(--color-jarvs-accent);
+  --tw-prose-hr: var(--color-jarvs-border);
+  --tw-prose-quotes: var(--color-jarvs-text);
+  --tw-prose-quote-borders: var(--color-jarvs-accent);
+  --tw-prose-captions: var(--color-jarvs-text-muted);
+  --tw-prose-code: var(--color-jarvs-accent);
+  --tw-prose-pre-code: var(--color-jarvs-text);
+  --tw-prose-pre-bg: var(--jarvs-code-background);
+  --tw-prose-th-borders: var(--color-jarvs-border-strong);
+  --tw-prose-td-borders: var(--color-jarvs-border);
+}
+
+.message-markdown :is(pre, th, td) {
+  border-color: var(--color-jarvs-border);
+}
+
+.message-markdown pre {
+  border: 1px solid var(--color-jarvs-border);
+  border-radius: 0.5rem;
+  background: var(--jarvs-code-background);
+}
+
+.settings-overlay {
+  background: var(--jarvs-overlay);
+  backdrop-filter: var(--jarvs-backdrop-filter);
+}
+
+.settings-panel {
+  background: var(--jarvs-panel-background);
+  border: 1px solid var(--color-jarvs-border-strong);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.34), 0 0 32px var(--color-jarvs-accent-glow);
+  backdrop-filter: var(--jarvs-backdrop-filter);
+}
+
+.settings-panel__body {
+  scrollbar-gutter: stable;
+}
+
+.settings-control {
+  color: var(--color-jarvs-text);
+  background: var(--jarvs-control-background);
+}
+
+.settings-control::placeholder {
+  color: var(--color-jarvs-text-muted);
+}
+
+.settings-control option {
+  color: var(--color-jarvs-text);
+  background: var(--color-jarvs-surface);
+}
+
+.settings-control:focus {
+  box-shadow: 0 0 0 2px var(--color-jarvs-accent-glow);
+}
+
+.theme-description {
+  min-height: 2rem;
+}
+
+.settings-secondary {
+  background: var(--color-jarvs-surface);
+  border: 1px solid var(--color-jarvs-border);
+}
+
+.settings-secondary:hover {
+  background: var(--color-jarvs-surface-hover);
+}
+
+.settings-icon-button:hover {
+  background: var(--color-jarvs-surface-hover);
+}
+
+.accent-button {
+  color: var(--jarvs-accent-contrast);
+}
+
+.danger-button {
+  color: #ff8b91;
+  background: transparent;
+  border-color: rgba(255, 101, 111, 0.3);
+}
+
+.danger-button:hover,
+.danger-button--filled {
+  background: rgba(218, 55, 68, 0.18);
+}
+
+.danger-button--filled:hover {
+  background: rgba(218, 55, 68, 0.28);
+}
+
+[data-theme="light"] .danger-button {
+  color: #9d2831;
+  border-color: rgba(157, 40, 49, 0.28);
+}
+
+[data-theme="light"] .danger-button:hover,
+[data-theme="light"] .danger-button--filled {
+  background: rgba(185, 46, 57, 0.11);
+}
+
+[data-theme="light"] .danger-button--filled:hover {
+  background: rgba(185, 46, 57, 0.17);
+}
+
+.session-alert {
+  color: #ffe4a1;
+  background: rgba(245, 171, 38, 0.1);
+  border-color: rgba(245, 171, 38, 0.27);
+}
+
+.session-alert__icon {
+  color: #f7c75f;
+}
+
+.session-alert__dismiss {
+  color: rgba(255, 228, 161, 0.7);
+}
+
+.session-alert__dismiss:hover {
+  color: #ffe4a1;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+[data-theme="light"] .session-alert {
+  color: #694800;
+  background: rgba(255, 190, 42, 0.16);
+  border-color: rgba(154, 105, 0, 0.26);
+}
+
+[data-theme="light"] .session-alert__icon,
+[data-theme="light"] .session-alert__dismiss {
+  color: #8a5e00;
+}
+
+.jarvs-empty {
+  opacity: 0.86;
+}
+
+.jarvs-core {
+  position: relative;
+  width: 94px;
+  height: 94px;
+  filter: drop-shadow(0 0 15px var(--color-jarvs-accent-glow));
+}
+
+.jarvs-core__ring,
+.jarvs-core__center {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+}
+
+.jarvs-core__ring {
+  border: 1px solid var(--color-jarvs-border-strong);
+  box-shadow: inset 0 0 12px var(--color-jarvs-accent-glow), 0 0 10px var(--color-jarvs-accent-glow);
+}
+
+.jarvs-core__ring--outer {
+  width: 92px;
+  height: 92px;
+  border-style: solid dashed solid dashed;
+  animation: coreOrbit 14s linear infinite;
+}
+
+.jarvs-core__ring--middle {
+  width: 70px;
+  height: 70px;
+  border-color: var(--color-jarvs-border);
+  animation: coreOrbitReverse 10s linear infinite;
+}
+
+.jarvs-core__center {
+  display: grid;
+  width: 50px;
+  height: 50px;
+  place-items: center;
+  background: var(--jarvs-core-fill);
+  border: 1px solid var(--color-jarvs-border-strong);
+  box-shadow: inset 0 0 18px rgba(255, 255, 255, 0.04), 0 0 22px var(--color-jarvs-accent-glow);
+}
+
+.jarvs-core__signal {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.jarvs-core__signal i {
+  width: 3px;
+  height: 11px;
+  border-radius: 999px;
+  background: var(--color-jarvs-accent);
+  box-shadow: 0 0 6px var(--color-jarvs-accent);
+  animation: coreSignal 1.3s ease-in-out infinite;
+}
+
+.jarvs-core__signal i:nth-child(2),
+.jarvs-core__signal i:nth-child(4) {
+  animation-delay: 120ms;
+}
+
+.jarvs-core__signal i:nth-child(3) {
+  animation-delay: 240ms;
+}
+
+.jarvs-empty__eyebrow {
+  margin: 0.25rem 0 0;
+  color: var(--color-jarvs-accent);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  text-shadow: 0 0 10px var(--color-jarvs-accent-glow);
+}
+
+@keyframes coreOrbit {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to { transform: translate(-50%, -50%) rotate(360deg); }
+}
+
+@keyframes coreOrbitReverse {
+  from { transform: translate(-50%, -50%) rotate(360deg); }
+  to { transform: translate(-50%, -50%) rotate(0deg); }
+}
+
+@keyframes coreSignal {
+  0%, 100% { height: 8px; opacity: 0.66; }
+  50% { height: 14px; opacity: 1; }
+}
+
+@media (max-height: 420px) {
+  .settings-overlay {
+    align-items: stretch;
+    padding: 8px;
+  }
+
+  .settings-panel {
+    border-radius: 10px;
+  }
+
+  .jarvs-core {
+    width: 72px;
+    height: 72px;
+  }
+
+  .jarvs-core__ring--outer {
+    width: 70px;
+    height: 70px;
+  }
+
+  .jarvs-core__ring--middle {
+    width: 54px;
+    height: 54px;
+  }
+
+  .jarvs-core__center {
+    width: 40px;
+    height: 40px;
+  }
+}
+
+@media (max-width: 460px) {
+  .settings-panel__footer > button {
+    flex: 1 1 auto;
+  }
+
+  .brand-mark {
+    letter-spacing: 0.1em;
+  }
+}
+
+@keyframes softPulse {
+  0%, 100% { opacity: 0.6; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+
+.ai-pulse {
+  animation: softPulse 2.5s ease-in-out infinite;
+}
+
+.thought-process__content {
+  max-height: 45vh;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.thought-process__content p {
+  margin: 0.25rem 0;
+}
+
+.thought-process__content pre {
+  margin: 0.4rem 0;
+  padding: 0.55rem;
+  overflow-x: auto;
+  border: 1px solid var(--color-jarvs-border);
+  border-radius: 0.5rem;
+  background: var(--jarvs-code-background);
+}
+
+.thought-process__content code {
+  color: var(--color-jarvs-accent);
+  white-space: pre-wrap;
+}
+
+.attachment-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  color: var(--color-jarvs-accent);
+  font-size: 10px;
+  background: var(--color-jarvs-accent-glow);
+  border: 1px solid var(--jarvs-user-message-border);
+  border-radius: 6px;
+}
+
+.msg-user,
+.msg-assistant {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.msg-content-scroll {
+  max-height: 60vh;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.msg-content-scroll::-webkit-scrollbar {
+  width: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
