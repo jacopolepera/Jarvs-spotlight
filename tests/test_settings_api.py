@@ -6,8 +6,9 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from core.agent.coordinator import SpecialistUnavailableError
 from core.daemon.security import DaemonSecurity
-from core.daemon.server import DaemonRuntime, create_app
+from core.daemon.server import DaemonRuntime, _direct_fallback_metadata, create_app
 from core.tools.settings_manager import SettingsManager
 from core.vision.attachment_broker import AttachmentBroker
 
@@ -111,6 +112,31 @@ def websocket(api):
         headers={"Origin": ORIGIN},
         subprotocols=WS_PROTOCOLS,
     )
+
+
+def test_direct_fallback_is_advertised_only_before_specialist_execution():
+    expected = {
+        "mode": "direct",
+        "automatic": False,
+        "safe_before_execution": True,
+    }
+    assert _direct_fallback_metadata("specialist_unavailable") == expected
+    assert (
+        _direct_fallback_metadata(
+            "execution_denied",
+            "hermes_adapter_unavailable",
+        )
+        == expected
+    )
+    assert _direct_fallback_metadata("execution_denied", "approval_denied") is None
+    assert (
+        _direct_fallback_metadata(
+            "execution_denied",
+            "hermes_preflight_cancelled",
+        )
+        is None
+    )
+    assert _direct_fallback_metadata("specialist_execution_failed") is None
 
 
 def test_http_requires_token_and_exact_origin(api):
@@ -304,6 +330,38 @@ def test_websocket_preserves_streaming_contract(api):
     assert first["channel"] == "answer"
     assert second["text"] == " World"
     assert terminal["type"] == "done"
+
+
+def test_unavailable_specialist_returns_explicit_non_automatic_direct_fallback(api):
+    def unavailable_specialist(_generation, _messages):
+        raise SpecialistUnavailableError("Hermes is unavailable")
+        yield  # pragma: no cover - makes this a generator like the real stream
+
+    api.runtime.get_session_service().stream = unavailable_specialist
+    with websocket(api) as socket:
+        session_id = socket.receive_json()["session_id"]
+        socket.send_json(
+            {
+                "prompt": "Research this",
+                "attachments": [],
+                "session_id": session_id,
+                "generation_id": "specialist-unavailable",
+                "route": {"specialist_capability": "research"},
+            }
+        )
+        assert socket.receive_json()["type"] == "started"
+        while True:
+            terminal = socket.receive_json()
+            if terminal["type"] in {"done", "error"}:
+                break
+
+    assert terminal["type"] == "error"
+    assert terminal["code"] == "specialist_unavailable"
+    assert terminal["fallback"] == {
+        "mode": "direct",
+        "automatic": False,
+        "safe_before_execution": True,
+    }
 
 
 def confirmation_chunks(engine):

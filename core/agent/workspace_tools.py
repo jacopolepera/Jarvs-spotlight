@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -25,6 +26,7 @@ MAX_SEARCH_FILES = 500
 MAX_WALK_ENTRIES = 5_000
 MAX_WALK_DIRECTORIES = 1_000
 MAX_WALK_DEPTH = 64
+_MUTATION_LOCK = threading.RLock()
 SKIPPED_DIRECTORIES = {
     ".git",
     ".hg",
@@ -232,6 +234,11 @@ def _relative(root: Path, path: Path) -> str:
 
 
 def _write_text(arguments: Mapping[str, Any], context: ToolContext) -> dict[str, Any]:
+    with _MUTATION_LOCK:
+        return _write_text_locked(arguments, context)
+
+
+def _write_text_locked(arguments: Mapping[str, Any], context: ToolContext) -> dict[str, Any]:
     root, path = _resolve_workspace_path(context, arguments["path"])
     content = arguments["content"]
     encoded = content.encode("utf-8")
@@ -256,6 +263,19 @@ def _write_text(arguments: Mapping[str, Any], context: ToolContext) -> dict[str,
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
+        # Revalidate after staging, including optimistic edits against the
+        # latest on-disk content. Never publish a cancelled staged write.
+        _resolve_workspace_path(context, arguments["path"])
+        if context.cancelled.is_set():
+            raise RuntimeError("workspace write cancelled")
+        expected = arguments.get("expected_sha256")
+        if expected is not None and hashlib.sha256(
+            _read_bounded(path, MAX_TEXT_FILE_BYTES)
+        ).hexdigest() != expected:
+            raise ToolValidationError(
+                "The file changed; read it again before editing.",
+                reason_code="workspace_edit_conflict",
+            )
         os.replace(temporary, path)
         temporary = None
     finally:
@@ -270,6 +290,47 @@ def _write_text(arguments: Mapping[str, Any], context: ToolContext) -> dict[str,
         "sha256": hashlib.sha256(encoded).hexdigest(),
         "operation": "replaced" if existed else "created",
     }
+
+
+def _edit_preflight(arguments: Mapping[str, Any], context: ToolContext) -> str | None:
+    return _write_preflight({**arguments, "overwrite": True}, context)
+
+
+def _edit_text(arguments: Mapping[str, Any], context: ToolContext) -> dict[str, Any]:
+    """Apply one bounded edit batch or leave the file entirely unchanged."""
+    with _MUTATION_LOCK:
+        _root, path = _resolve_workspace_path(context, arguments["path"])
+        raw = _read_bounded(path, MAX_TEXT_FILE_BYTES)
+        expected = arguments["expected_sha256"]
+        if hashlib.sha256(raw).hexdigest() != expected:
+            raise ToolValidationError(
+                "The file changed; read it again before editing.",
+                reason_code="workspace_edit_conflict",
+            )
+        if b"\x00" in raw:
+            raise ValueError("workspace file appears to be binary")
+        content = raw.decode("utf-8")
+        replacements = 0
+        for edit in arguments["edits"]:
+            old = edit["old_text"]
+            expected_count = edit.get("expected_count", 1)
+            count = content.count(old)
+            if count != expected_count:
+                raise ToolValidationError(
+                    f"Expected {expected_count} exact matches, found {count}; no edits applied.",
+                    reason_code="workspace_edit_match_conflict",
+                )
+            content = content.replace(old, edit["new_text"])
+            if len(content.encode("utf-8")) > MAX_TEXT_WRITE_BYTES:
+                raise ValueError("workspace edited text exceeds the bounded size limit")
+            replacements += count
+        result = _write_text_locked(
+            {"path": arguments["path"], "content": content,
+             "overwrite": True, "expected_sha256": expected},
+            context,
+        )
+        return {**result, "operation": "edited", "replacements": replacements,
+                "previous_sha256": expected}
 
 
 def _make_directory(arguments: Mapping[str, Any], context: ToolContext) -> dict[str, Any]:
@@ -407,6 +468,7 @@ def _read_text(arguments: Mapping[str, Any], context: ToolContext) -> dict[str, 
         "total_lines": len(lines),
         "truncated": start_line - 1 + len(selected) < len(lines),
         "text": "\n".join(selected),
+        "sha256": hashlib.sha256(raw).hexdigest(),
     }
 
 
@@ -566,6 +628,44 @@ def workspace_tool_definitions() -> tuple[ToolDefinition, ...]:
             source="jarvs_builtin",
             scope="configured_workspace",
             preflight=_write_preflight,
+        ),
+        ToolDefinition(
+            name="workspace.edit_text",
+            description=(
+                "Apply precise text replacements atomically to an existing UTF-8 file. "
+                "First read_text to obtain the full-file sha256; pass it as expected_sha256. "
+                "Edits apply in order, each requiring exactly expected_count matches (default 1). "
+                "Any mismatch leaves the entire file unchanged. Executable scripts are excluded."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+                    "expected_sha256": {"type": "string", "minLength": 64, "maxLength": 64},
+                    "edits": {
+                        "type": "array", "minItems": 1, "maxItems": 20,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_text": {"type": "string", "minLength": 1, "maxLength": 65536},
+                                "new_text": {"type": "string", "maxLength": 65536},
+                                "expected_count": {"type": "integer", "minimum": 1, "maximum": 1000},
+                            },
+                            "required": ["old_text", "new_text"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["path", "expected_sha256", "edits"],
+                "additionalProperties": False,
+            },
+            handler=_edit_text,
+            capability="workspace.write",
+            effect=ToolEffect.WORKSPACE_WRITE,
+            risk=ToolRisk.MEDIUM,
+            source="jarvs_builtin",
+            scope="configured_workspace",
+            preflight=_edit_preflight,
         ),
         ToolDefinition(
             name="workspace.make_directory",

@@ -10,11 +10,12 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
-from .events import EventType, RunEvent
+from .events import EventType, RunEvent, utc_now
 
 
 RUN_STATUSES = frozenset({"running", "completed", "cancelled", "failed"})
@@ -29,6 +30,8 @@ EFFECT_EVENT_STATUSES = {
     EventType.TOOL_FAILED.value: "failed",
 }
 TERMINAL_EFFECT_STATUSES = frozenset({"completed", "denied", "cancelled", "failed"})
+RECOVERY_ACKNOWLEDGED = "recovery.acknowledged"
+RECOVERY_RESOLUTIONS = frozenset({"confirmed_applied", "confirmed_not_applied", "reviewed"})
 
 
 class RunStoreError(RuntimeError):
@@ -41,6 +44,20 @@ class RunNotFoundError(RunStoreError, LookupError):
 
 class RunStoreSequenceError(RunStoreError, ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class RecoveryRecord:
+    run_id: str
+    invocation_id: str
+    tool_name: str
+    effect: str | None
+    detected_at: str
+    resolution: str | None
+    acknowledged_at: str | None
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -101,6 +118,11 @@ class RunStore:
 
         if not isinstance(event, RunEvent):
             raise TypeError("event must be a RunEvent")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._append_event(connection, event)
+
+    def _append_event(self, connection: sqlite3.Connection, event: RunEvent) -> bool:
         record = event.as_dict()
         payload_json = json.dumps(
             record["payload"],
@@ -109,91 +131,225 @@ class RunStore:
             sort_keys=True,
             separators=(",", ":"),
         )
-        with self._lock, self._connect() as connection:
-            existing = connection.execute(
-                "SELECT * FROM run_events WHERE run_id = ? AND sequence = ?",
-                (event.run_id, event.sequence),
-            ).fetchone()
-            if existing is not None:
-                if self._same_event(existing, event, payload_json):
-                    return False
-                raise RunStoreSequenceError(
-                    "run sequence is already occupied by a different event"
-                )
+        existing = connection.execute(
+            "SELECT * FROM run_events WHERE run_id = ? AND sequence = ?",
+            (event.run_id, event.sequence),
+        ).fetchone()
+        if existing is not None:
+            if self._same_event(existing, event, payload_json):
+                return False
+            raise RunStoreSequenceError(
+                "run sequence is already occupied by a different event"
+            )
 
-            run = connection.execute(
-                "SELECT last_sequence FROM runs WHERE run_id = ?",
-                (event.run_id,),
-            ).fetchone()
-            if run is None:
-                if event.sequence != 1 or event.type != EventType.RUN_STARTED.value:
-                    raise RunStoreSequenceError(
-                        "a run must begin with run.started at sequence 1"
-                    )
-                payload = event.payload_dict()
-                connection.execute(
-                    """
-                    INSERT INTO runs (
-                        run_id, session_id, generation_id, status, started_at,
-                        updated_at, completed_at, last_sequence
-                    ) VALUES (?, ?, ?, 'running', ?, ?, NULL, 0)
-                    """,
-                    (
-                        event.run_id,
-                        self._bounded_text(payload.get("session_id")),
-                        self._bounded_text(payload.get("generation_id")),
-                        event.occurred_at,
-                        event.occurred_at,
-                    ),
-                )
-                expected_sequence = 1
-            else:
-                expected_sequence = int(run["last_sequence"]) + 1
-            if event.sequence != expected_sequence:
+        run = connection.execute(
+            "SELECT last_sequence, status FROM runs WHERE run_id = ?",
+            (event.run_id,),
+        ).fetchone()
+        if run is None:
+            if event.sequence != 1 or event.type != EventType.RUN_STARTED.value:
                 raise RunStoreSequenceError(
-                    f"expected run sequence {expected_sequence}, got {event.sequence}"
+                    "a run must begin with run.started at sequence 1"
                 )
-
+            payload = event.payload_dict()
             connection.execute(
                 """
-                INSERT INTO run_events (
-                    event_id, run_id, sequence, type, occurred_at,
-                    payload_json, schema_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO runs (
+                    run_id, session_id, generation_id, status, started_at,
+                    updated_at, completed_at, last_sequence
+                ) VALUES (?, ?, ?, 'running', ?, ?, NULL, 0)
                 """,
                 (
-                    event.event_id,
                     event.run_id,
-                    event.sequence,
-                    event.type,
+                    self._bounded_text(payload.get("session_id")),
+                    self._bounded_text(payload.get("generation_id")),
                     event.occurred_at,
-                    payload_json,
-                    event.schema_version,
+                    event.occurred_at,
                 ),
             )
-            status = self._run_status(event.type)
-            connection.execute(
-                """
-                UPDATE runs
-                SET status = COALESCE(?, status),
-                    updated_at = ?,
-                    completed_at = CASE
-                        WHEN ? IS NULL THEN completed_at ELSE ?
-                    END,
-                    last_sequence = ?
-                WHERE run_id = ?
-                """,
-                (
-                    status,
-                    event.occurred_at,
-                    status,
-                    event.occurred_at,
-                    event.sequence,
-                    event.run_id,
-                ),
+            expected_sequence = 1
+        else:
+            if run["status"] in TERMINAL_RUN_STATUSES and event.type != RECOVERY_ACKNOWLEDGED:
+                raise RunStoreError("run lifecycle cannot advance after a terminal event")
+            expected_sequence = int(run["last_sequence"]) + 1
+        if event.sequence != expected_sequence:
+            raise RunStoreSequenceError(
+                f"expected run sequence {expected_sequence}, got {event.sequence}"
             )
-            self._project_effect(connection, event)
+
+        connection.execute(
+            """
+            INSERT INTO run_events (
+                event_id, run_id, sequence, type, occurred_at,
+                payload_json, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.event_id,
+                event.run_id,
+                event.sequence,
+                event.type,
+                event.occurred_at,
+                payload_json,
+                event.schema_version,
+            ),
+        )
+        status = self._run_status(event.type)
+        connection.execute(
+            """
+            UPDATE runs
+            SET status = COALESCE(?, status),
+                updated_at = ?,
+                completed_at = CASE
+                    WHEN ? IS NULL THEN completed_at ELSE ?
+                END,
+                last_sequence = ?
+            WHERE run_id = ?
+            """,
+            (
+                status,
+                event.occurred_at,
+                status,
+                event.occurred_at,
+                event.sequence,
+                event.run_id,
+            ),
+        )
+        self._project_effect(connection, event)
+        self._project_recovery(connection, event)
         return True
+
+    def recover_interrupted_runs(self) -> dict[str, int]:
+        """Close orphaned runs once at daemon startup, before accepting work.
+
+        This must only be called by the exclusive daemon owner, never while
+        another process can execute work in this store. No tool is invoked.
+        Each run's recovery events and projections commit atomically; a crash
+        during recovery leaves that run eligible for the next startup.
+        """
+        counts = {"runs": 0, "cancelled_effects": 0, "uncertain_effects": 0}
+        if not self.path.exists():
+            return counts
+        while True:
+            with self._lock, self._connect(create=False) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                run = connection.execute(
+                    "SELECT * FROM runs WHERE status = 'running' ORDER BY started_at, run_id LIMIT 1"
+                ).fetchone()
+                if run is None:
+                    return counts
+                effects = connection.execute(
+                    "SELECT * FROM effects WHERE run_id = ? AND status IN ('requested', 'approval_required', 'started') ORDER BY last_sequence",
+                    (run["run_id"],),
+                ).fetchall()
+                sequence = int(run["last_sequence"])
+                timestamp = utc_now()
+                uncertain = cancelled = 0
+                for effect in effects:
+                    started = effect["status"] == "started"
+                    sequence += 1
+                    self._append_event(connection, RunEvent.create(
+                        run_id=run["run_id"], sequence=sequence,
+                        type=EventType.TOOL_FAILED if started else EventType.TOOL_CANCELLED,
+                        occurred_at=timestamp,
+                        payload={
+                            "invocation_id": effect["invocation_id"],
+                            "tool_name": effect["tool_name"],
+                            "arguments_hash": effect["arguments_hash"],
+                            "reason_code": "restart_outcome_unknown" if started else "restart_before_start",
+                            "recovery_required": started,
+                        },
+                    ))
+                    uncertain += int(started)
+                    cancelled += int(not started)
+                self._append_event(connection, RunEvent.create(
+                    run_id=run["run_id"], sequence=sequence + 1,
+                    type=EventType.RUN_FAILED, occurred_at=timestamp,
+                    payload={"reason_code": "daemon_restarted", "uncertain_effects": uncertain},
+                ))
+            counts["runs"] += 1
+            counts["uncertain_effects"] += uncertain
+            counts["cancelled_effects"] += cancelled
+
+    def list_recoveries(
+        self, *, include_acknowledged: bool = False, limit: int = 100
+    ) -> tuple[RecoveryRecord, ...]:
+        self._validate_limit(limit)
+        if not self.path.exists():
+            return ()
+        where = "" if include_acknowledged else "WHERE r.acknowledged_at IS NULL"
+        with self._lock, self._connect(create=False) as connection:
+            rows = connection.execute(
+                f"""SELECT r.*, e.tool_name, e.effect FROM effect_recoveries r
+                JOIN effects e USING (run_id, invocation_id) {where}
+                ORDER BY r.detected_at DESC, r.run_id, r.invocation_id LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return tuple(self._recovery(row) for row in rows)
+
+    def acknowledge_recovery(
+        self, run_id: str, invocation_id: str, *, resolution: str
+    ) -> RecoveryRecord:
+        """Record human review, without claiming or retrying tool execution."""
+        self._validate_identifier(run_id, "run_id")
+        self._validate_identifier(invocation_id, "invocation_id")
+        if resolution not in RECOVERY_RESOLUTIONS:
+            raise ValueError("invalid recovery resolution")
+        if not self.path.exists():
+            raise RunNotFoundError("Recovery not found.")
+        with self._lock, self._connect(create=False) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT r.*, e.tool_name, e.effect FROM effect_recoveries r
+                JOIN effects e USING (run_id, invocation_id)
+                WHERE r.run_id = ? AND r.invocation_id = ?""",
+                (run_id, invocation_id),
+            ).fetchone()
+            if row is None:
+                raise RunNotFoundError("Recovery not found.")
+            if row["resolution"] is not None:
+                if row["resolution"] != resolution:
+                    raise RunStoreError("recovery has already been acknowledged differently")
+                return self._recovery(row)
+            sequence = connection.execute(
+                "SELECT last_sequence FROM runs WHERE run_id = ?", (run_id,)
+            ).fetchone()["last_sequence"]
+            timestamp = utc_now()
+            self._append_event(connection, RunEvent.create(
+                run_id=run_id, sequence=int(sequence) + 1,
+                type=RECOVERY_ACKNOWLEDGED, occurred_at=timestamp,
+                payload={"invocation_id": invocation_id, "resolution": resolution},
+            ))
+            return RecoveryRecord(
+                run_id=run_id, invocation_id=invocation_id, tool_name=row["tool_name"],
+                effect=row["effect"], detected_at=row["detected_at"],
+                resolution=resolution, acknowledged_at=timestamp,
+            )
+
+    def _project_recovery(self, connection: sqlite3.Connection, event: RunEvent) -> None:
+        payload = event.payload_dict()
+        if event.type == EventType.TOOL_FAILED.value and payload.get("reason_code") == "restart_outcome_unknown":
+            connection.execute(
+                """INSERT INTO effect_recoveries
+                (run_id, invocation_id, detected_at, resolution, acknowledged_at)
+                VALUES (?, ?, ?, NULL, NULL)""",
+                (event.run_id, payload["invocation_id"], event.occurred_at),
+            )
+        elif event.type == RECOVERY_ACKNOWLEDGED:
+            resolution = payload.get("resolution")
+            if resolution not in RECOVERY_RESOLUTIONS:
+                raise RunStoreError("invalid recovery resolution")
+            updated = connection.execute(
+                """UPDATE effect_recoveries SET resolution = ?, acknowledged_at = ?
+                WHERE run_id = ? AND invocation_id = ? AND resolution IS NULL""",
+                (resolution, event.occurred_at, event.run_id, payload.get("invocation_id")),
+            )
+            if updated.rowcount != 1:
+                raise RunStoreError("recovery is missing or already acknowledged")
+
+    @staticmethod
+    def _recovery(row: Mapping[str, Any]) -> RecoveryRecord:
+        return RecoveryRecord(**{field: row[field] for field in RecoveryRecord.__dataclass_fields__})
 
     def get_run(self, run_id: str) -> RunSummary:
         self._validate_identifier(run_id, "run_id")
@@ -369,7 +525,16 @@ class RunStore:
             ),
         )
 
-    def _connect(self, *, create: bool = True) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self, *, create: bool = True) -> Iterator[sqlite3.Connection]:
+        connection = self._open_connection(create=create)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
+    def _open_connection(self, *, create: bool = True) -> sqlite3.Connection:
         path = self.path
         if create:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -435,6 +600,18 @@ class RunStore:
         )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS effects_status ON effects(status, requested_at DESC)"
+        )
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS effect_recoveries (
+                run_id TEXT NOT NULL,
+                invocation_id TEXT NOT NULL,
+                detected_at TEXT NOT NULL,
+                resolution TEXT,
+                acknowledged_at TEXT,
+                PRIMARY KEY(run_id, invocation_id),
+                FOREIGN KEY(run_id, invocation_id)
+                    REFERENCES effects(run_id, invocation_id) ON DELETE CASCADE
+            )"""
         )
         return connection
 

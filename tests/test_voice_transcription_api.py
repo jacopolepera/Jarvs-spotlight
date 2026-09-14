@@ -22,6 +22,12 @@ class FakeResponse:
     def json(self):
         return self._payload
 
+    def iter_content(self, chunk_size):
+        yield json.dumps(self._payload).encode()
+
+    def close(self):
+        pass
+
 
 def write_config(root, *, api_key="voice-secret"):
     (root / "models.json").write_text(
@@ -49,6 +55,7 @@ def write_config(root, *, api_key="voice-secret"):
                 "model": "gemini",
                 "execution_policy": "always_ask",
                 "cloud_workspace_egress": "deny",
+                "voice": {"provider": "gemini"},
             }
         ),
         encoding="utf-8",
@@ -154,3 +161,87 @@ def test_voice_api_returns_stable_errors_for_invalid_audio_and_missing_key(tmp_p
     assert invalid.json()["detail"]["code"] == "invalid_audio"
     assert missing.status_code == 409
     assert missing.json()["detail"]["code"] == "voice_api_key_missing"
+
+
+def test_local_voice_settings_persist_and_drive_transcription_without_cloud(tmp_path, monkeypatch):
+    write_config(tmp_path)
+    settings = SettingsManager(root_dir=tmp_path)
+    runtime = DaemonRuntime(settings)
+    app = create_app(runtime, DaemonSecurity.create(TOKEN))
+    captured = {}
+
+    class LocalSession:
+        trust_env = True
+
+        def post(self, url, **kwargs):
+            captured.update(url=url, trust_env=self.trust_env, **kwargs)
+            return FakeResponse(payload={"text": "  dettatura locale  "})
+
+        def close(self):
+            captured["closed"] = True
+
+    monkeypatch.setattr("core.audio.transcriber.requests.Session", LocalSession)
+    monkeypatch.setattr(
+        "core.audio.transcriber.transcribe_audio_gemini_data",
+        lambda *_args, **_kwargs: pytest.fail("Cloud must not be used for local speech"),
+    )
+    voice = {
+        "provider": "local", "base_url": "http://localhost:8088/v1/",
+        "model": "local-whisper", "language": "it",
+    }
+    with TestClient(app) as client:
+        assert client.post("/settings/voice", json=voice).status_code == 401
+        saved = client.post("/settings/voice", json=voice, headers=AUTH)
+        assert saved.status_code == 200
+        expected = {**voice, "base_url": "http://127.0.0.1:8088/v1"}
+        assert saved.json() == {"status": "ok", "voice": expected}
+        assert client.get("/settings", headers=AUTH).json()["voice"] == expected
+        assert SettingsManager(root_dir=tmp_path).get_voice_config() == expected
+        response = client.post("/voice/transcribe", headers=AUTH, json={
+            "audio_base64": base64.b64encode(b"recorded-audio").decode(),
+            "mime_type": "audio/webm;codecs=opus",
+        })
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "text": "dettatura locale"}
+    assert captured["url"] == "http://127.0.0.1:8088/v1/audio/transcriptions"
+    assert captured["data"]["model"] == "local-whisper"
+    assert captured["data"]["language"] == "it"
+    assert captured["trust_env"] is False
+    assert captured["closed"] is True
+    assert "voice-secret" not in repr(captured)
+
+
+def test_invalid_local_endpoint_does_not_change_persisted_voice_settings(tmp_path):
+    write_config(tmp_path)
+    settings = SettingsManager(root_dir=tmp_path)
+    expected = settings.get_voice_config()
+    app = create_app(DaemonRuntime(settings), DaemonSecurity.create(TOKEN))
+    with TestClient(app) as client:
+        response = client.post("/settings/voice", headers=AUTH, json={
+            "provider": "local", "base_url": "https://external.test/v1",
+        })
+    assert response.status_code == 422
+    assert settings.get_voice_config() == expected
+    assert SettingsManager(root_dir=tmp_path).get_voice_config() == expected
+
+
+@pytest.mark.parametrize(("code", "status"), [
+    ("voice_provider_unavailable", 502), ("voice_provider_timeout", 504),
+    ("voice_configuration_invalid", 409),
+])
+def test_voice_api_maps_local_service_failures(tmp_path, monkeypatch, code, status):
+    write_config(tmp_path)
+    settings = SettingsManager(root_dir=tmp_path)
+    settings.set_voice_config({"provider": "local"})
+
+    def transcribe(*_args, **_kwargs):
+        raise VoiceTranscriptionError(code, "Actionable local speech error")
+
+    monkeypatch.setattr("core.audio.transcriber.transcribe_audio_data", transcribe)
+    app = create_app(DaemonRuntime(settings), DaemonSecurity.create(TOKEN))
+    with TestClient(app) as client:
+        response = client.post("/voice/transcribe", headers=AUTH, json={
+            "audio_base64": base64.b64encode(b"audio").decode(), "mime_type": "audio/wav",
+        })
+    assert response.status_code == status
+    assert response.json()["detail"]["code"] == code

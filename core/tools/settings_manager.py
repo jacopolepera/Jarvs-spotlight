@@ -9,6 +9,10 @@ from core.agent.policy import ExecutionPolicy, parse_execution_policy
 from core.agent.egress import CloudWorkspaceEgress
 
 
+_UNSET = object()
+_MAX_HERMES_PATH_CHARS = 32_768
+
+
 class SettingsManager:
     """Manages persistent user settings for Jarvs Spotlight using a local JSON file.
 
@@ -86,6 +90,36 @@ class SettingsManager:
         except (TypeError, ValueError):
             default_settings["cloud_workspace_egress"] = CloudWorkspaceEgress.DENY.value
         default_settings.pop("auto_run", None)
+
+        # Hermes is an optional sidecar and remains disabled when these keys
+        # are absent.  Validate persisted pilot settings without injecting the
+        # defaults into otherwise canonical files on every startup.
+        if "hermes_enabled" in default_settings and not isinstance(
+            default_settings["hermes_enabled"], bool
+        ):
+            default_settings["hermes_enabled"] = False
+        if "hermes_allow_effectful_fixture" in default_settings and not isinstance(
+            default_settings["hermes_allow_effectful_fixture"], bool
+        ):
+            default_settings["hermes_allow_effectful_fixture"] = False
+        for key in ("hermes_runtime_path", "hermes_home_path"):
+            if key in default_settings:
+                try:
+                    default_settings[key] = self._validate_hermes_path(
+                        default_settings[key], key
+                    )
+                except ValueError:
+                    default_settings[key] = ""
+        # A runtime version/commit is verified by the adapter contract, never
+        # accepted as a user assertion in settings.
+        default_settings.pop("hermes_version", None)
+
+        if "voice" in default_settings:
+            from core.audio.config import DEFAULT_VOICE_CONFIG, normalize_voice_config
+            try:
+                default_settings["voice"] = normalize_voice_config(default_settings["voice"])
+            except ValueError:
+                default_settings["voice"] = dict(DEFAULT_VOICE_CONFIG)
 
         # Avoid touching the file on every daemon import/start. Persist only a
         # first-run default or an actual migration/normalization.
@@ -266,6 +300,115 @@ class SettingsManager:
             self._save_raw(updated)
             self.settings = updated
         return parsed.value
+
+    # ── Optional Hermes specialist ───────────────────────────────────────
+
+    @staticmethod
+    def _validate_hermes_path(value, field_name):
+        if not isinstance(value, str):
+            raise ValueError(f"{field_name} must be a string")
+        value = value.strip()
+        if not value:
+            return ""
+        if (
+            len(value) > _MAX_HERMES_PATH_CHARS
+            or "\x00" in value
+            or "\r" in value
+            or "\n" in value
+        ):
+            raise ValueError(f"{field_name} is invalid")
+        if not os.path.isabs(value):
+            raise ValueError(f"{field_name} must be an absolute path")
+        return os.path.normpath(value)
+
+    def get_hermes_settings(self):
+        """Return the secret-free, validated specialist configuration."""
+
+        with self._lock:
+            return {
+                "hermes_enabled": self.settings.get("hermes_enabled") is True,
+                "hermes_runtime_path": self._safe_hermes_path(
+                    self.settings.get("hermes_runtime_path")
+                ),
+                "hermes_home_path": self._safe_hermes_path(
+                    self.settings.get("hermes_home_path")
+                ),
+                # Informational and read-only. The adapter reports and pins the
+                # installed runtime version; users cannot assert it here.
+                "hermes_version": None,
+                "hermes_allow_effectful_fixture": (
+                    self.settings.get("hermes_allow_effectful_fixture") is True
+                ),
+            }
+
+    # Explicit alias used by transport code to document that no credentials
+    # or provider secrets are part of this response.
+    get_public_hermes_settings = get_hermes_settings
+
+    @classmethod
+    def _safe_hermes_path(cls, value):
+        try:
+            return cls._validate_hermes_path(value or "", "Hermes path")
+        except ValueError:
+            return ""
+
+    def set_hermes_settings(
+        self,
+        *,
+        enabled=_UNSET,
+        runtime_path=_UNSET,
+        home_path=_UNSET,
+        allow_effectful_fixture=_UNSET,
+    ):
+        """Validate and atomically persist a partial Hermes configuration."""
+
+        changes = {}
+        if enabled is not _UNSET:
+            if not isinstance(enabled, bool):
+                raise ValueError("hermes_enabled must be a boolean")
+            changes["hermes_enabled"] = enabled
+        if runtime_path is not _UNSET:
+            changes["hermes_runtime_path"] = self._validate_hermes_path(
+                runtime_path, "hermes_runtime_path"
+            )
+        if home_path is not _UNSET:
+            changes["hermes_home_path"] = self._validate_hermes_path(
+                home_path, "hermes_home_path"
+            )
+        if allow_effectful_fixture is not _UNSET:
+            if not isinstance(allow_effectful_fixture, bool):
+                raise ValueError(
+                    "hermes_allow_effectful_fixture must be a boolean"
+                )
+            changes["hermes_allow_effectful_fixture"] = allow_effectful_fixture
+
+        with self._lock:
+            updated = copy.deepcopy(self.settings)
+            updated.update(changes)
+            self._save_raw(updated)
+            self.settings = updated
+        return self.get_hermes_settings()
+
+    def validate_hermes_settings(
+        self,
+        *,
+        enabled=_UNSET,
+        runtime_path=_UNSET,
+        home_path=_UNSET,
+        allow_effectful_fixture=_UNSET,
+    ):
+        """Validate a partial update without mutating memory or disk."""
+
+        if enabled is not _UNSET and not isinstance(enabled, bool):
+            raise ValueError("hermes_enabled must be a boolean")
+        if runtime_path is not _UNSET:
+            self._validate_hermes_path(runtime_path, "hermes_runtime_path")
+        if home_path is not _UNSET:
+            self._validate_hermes_path(home_path, "hermes_home_path")
+        if allow_effectful_fixture is not _UNSET and not isinstance(
+            allow_effectful_fixture, bool
+        ):
+            raise ValueError("hermes_allow_effectful_fixture must be a boolean")
 
     # ── Model Registry (user_models.json / models.json) ──────────────────────
 
@@ -475,6 +618,26 @@ class SettingsManager:
         if "gemini" in model_str.lower():
             return self._read_env_api_key()
         return ""
+
+    def get_voice_config(self):
+        from core.audio.config import normalize_voice_config
+
+        with self._lock:
+            # Invalid persisted configuration must not silently opt into cloud.
+            return normalize_voice_config(self.settings.get("voice"))
+
+    def set_voice_config(self, changes):
+        from core.audio.config import normalize_voice_config
+
+        with self._lock:
+            previous = self.settings.get("voice")
+            merged = dict(previous) if isinstance(previous, dict) else {}
+            merged.update(changes)
+            voice = normalize_voice_config(merged)
+            updated = {**self.settings, "voice": voice}
+            self._save_raw(updated)
+            self.settings = updated
+            return dict(voice)
 
     def get_voice_api_key(self):
         """Return a Gemini key for speech transcription without exposing it."""

@@ -34,7 +34,6 @@ from .model_adapter import (
     ModelStreamEvent,
     ModelToolCallDelta,
     ProviderContext,
-    ProviderNotCompatibleError,
     provider_context_from_model,
 )
 from .routing import ExecutionLane, RoutingSignal, select_execution_lane
@@ -49,6 +48,7 @@ from .tooling import (
 from core.daemon.session_service import (
     Generation,
     SessionBusyError,
+    StaleGenerationError,
     StaleSessionError,
 )
 
@@ -87,6 +87,14 @@ class IncompleteModelResponseError(CoordinatorError):
 
 class InvalidModelToolCallError(CoordinatorError):
     code = "invalid_model_tool_call"
+
+
+class SpecialistUnavailableError(CoordinatorError):
+    code = "specialist_unavailable"
+
+
+class SpecialistExecutionError(CoordinatorError):
+    code = "specialist_execution_failed"
 
 
 class ShortTermTranscript:
@@ -220,6 +228,12 @@ class RunCoordinator:
         system_prompt_provider: Callable[[], str],
         memory_context_provider: Callable[[str], str] | None = None,
         event_sinks: Sequence[EventSink] = (),
+        specialist_request_stager: Callable[
+            [str, Sequence[Mapping[str, Any]], Generation], ToolInvocation
+        ]
+        | None = None,
+        specialist_executor_provider: Callable[[], ToolExecutor] | None = None,
+        specialist_request_discarder: Callable[[str], None] | None = None,
     ) -> None:
         self.settings_manager = settings_manager
         self.model_adapter = model_adapter
@@ -229,6 +243,9 @@ class RunCoordinator:
         self.system_prompt_provider = system_prompt_provider
         self.memory_context_provider = memory_context_provider
         self.event_sinks = tuple(event_sinks)
+        self.specialist_request_stager = specialist_request_stager
+        self.specialist_executor_provider = specialist_executor_provider
+        self.specialist_request_discarder = specialist_request_discarder
 
     def stream(
         self,
@@ -287,9 +304,13 @@ class RunCoordinator:
             )
         )
         if decision.lane is ExecutionLane.SPECIALIST:
-            raise ProviderNotCompatibleError(
-                "The requested specialist capability is not configured in the native runtime."
+            yield from self._stream_specialist(
+                generation,
+                incoming,
+                transcript,
+                events,
             )
+            return
 
         provider = provider_context_from_model(self.settings_manager.get_active_model())
         prompt_text = "\n".join(
@@ -349,6 +370,7 @@ class RunCoordinator:
                 }
                 yield _activity(events.emit(EventType.RUN_FAILED, {"reason_code": result.reason_code or result.status.value}))
                 return
+
             if not self._egress_allowed(provider, result):
                 text = self._local_only_result(provider, result)
                 yield {"role": "assistant", "type": "message", "content": text}
@@ -791,6 +813,152 @@ class RunCoordinator:
                 )
                 return
 
+    def _stream_specialist(
+        self,
+        generation: Generation,
+        incoming: Sequence[Mapping[str, Any]],
+        transcript: ShortTermTranscript,
+        events: RunEventStream,
+    ) -> Iterator[dict[str, Any]]:
+        """Run one explicitly selected specialist without a native model call.
+
+        The full request is staged out-of-band by the runtime. The registered
+        invocation therefore contains only bounded correlation metadata and
+        can safely pass through policy, approval, and durable audit.
+        """
+
+        capability = generation.routing_signal.specialist_capability
+        if (
+            capability is None
+            or self.specialist_request_stager is None
+            or self.specialist_executor_provider is None
+        ):
+            raise SpecialistUnavailableError(
+                "The requested specialist capability is not configured."
+            )
+
+        # Give Hermes the bounded short-term context Jarvs already owns while
+        # preserving room for every message in the current turn.  Hermes does
+        # not become the canonical transcript owner.
+        history = transcript.snapshot()
+        current = [dict(message) for message in incoming]
+        if len(current) > MAX_SESSION_MESSAGES:
+            raise SpecialistUnavailableError(
+                "The specialist turn contains too many messages."
+            )
+        history_room = MAX_SESSION_MESSAGES - len(current)
+        selected_history = history[-history_room:] if history_room else []
+        specialist_messages = selected_history + current
+        invocation = self.specialist_request_stager(
+            capability,
+            specialist_messages,
+            generation,
+        )
+        stream_state: dict[str, Any] = {"text_chunks": []}
+        try:
+            result = yield from self._execute_tool(
+                generation,
+                invocation,
+                events,
+                executor=self.specialist_executor_provider(),
+                specialist_stream_state=stream_state,
+            )
+        finally:
+            if self.specialist_request_discarder is not None:
+                self.specialist_request_discarder(invocation.invocation_id)
+
+        if result.status is ToolStatus.DENIED:
+            reason_code = result.reason_code or result.status.value
+            yield {
+                "role": "jarvs",
+                "type": "execution_denied",
+                "content": {
+                    "reason_code": reason_code,
+                    "tool_name": result.tool_name,
+                },
+            }
+            yield _activity(
+                events.emit(
+                    EventType.RUN_FAILED,
+                    {
+                        "reason_code": reason_code,
+                        "specialist": "hermes",
+                        "capability": capability,
+                    },
+                )
+            )
+            return
+        if result.status is ToolStatus.CANCELLED:
+            yield _activity(
+                events.emit(
+                    EventType.RUN_CANCELLED,
+                    {
+                        "reason_code": result.reason_code or "specialist_cancelled",
+                        "specialist": "hermes",
+                        "capability": capability,
+                    },
+                )
+            )
+            raise ModelGenerationCancelled("The specialist run was cancelled.")
+        if result.status is ToolStatus.FAILED:
+            yield _activity(
+                events.emit(
+                    EventType.RUN_FAILED,
+                    {
+                        "reason_code": result.reason_code or "specialist_failed",
+                        "specialist": "hermes",
+                        "capability": capability,
+                    },
+                )
+            )
+            raise SpecialistExecutionError("The Hermes specialist run failed.")
+        if result.status is not ToolStatus.COMPLETED:
+            raise SpecialistExecutionError(
+                "The Hermes specialist returned an invalid execution status."
+            )
+
+        output = result.output if isinstance(result.output, Mapping) else {}
+        final_text = str(output.get("text") or output.get("content") or "")
+        committed = _history_safe_messages(_incoming_to_openai(incoming))
+        if final_text:
+            prospective = committed + [{"role": "assistant", "content": final_text}]
+            if (
+                len(
+                    json.dumps(
+                        prospective,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                )
+                > MAX_SESSION_BYTES
+            ):
+                raise SpecialistExecutionError(
+                    "The Hermes turn exceeds Jarvs' short-term history budget."
+                )
+            yield {
+                "role": "assistant",
+                "type": "message",
+                "content": final_text,
+            }
+
+        # Only the final normalized answer is displayed and committed during
+        # the pilot. Hermes' contract can replace earlier delta segments via
+        # message.interim, so forwarding raw deltas would let UI and history
+        # disagree. Full streaming can return with explicit segment handling.
+        if final_text:
+            committed.append({"role": "assistant", "content": final_text})
+        transcript.commit(committed)
+        yield _activity(
+            events.emit(
+                EventType.RUN_COMPLETED,
+                {
+                    "specialist": "hermes",
+                    "capability": capability,
+                    "finish_reason": str(output.get("finish_reason") or "completed"),
+                },
+            )
+        )
+
     @staticmethod
     def _model_phase(
         *,
@@ -930,6 +1098,9 @@ class RunCoordinator:
         generation: Generation,
         invocation: ToolInvocation,
         events: RunEventStream,
+        *,
+        executor: ToolExecutor | None = None,
+        specialist_stream_state: dict[str, Any] | None = None,
     ) -> Iterator[dict[str, Any]]:
         bridge: queue.Queue[tuple[str, Any]] = queue.Queue()
 
@@ -954,10 +1125,18 @@ class RunCoordinator:
             cancelled=generation.cancelled,
             approval_notifier=approval_notifier,
         )
+        if specialist_stream_state is not None:
+            # ToolContext intentionally stays protocol-agnostic.  This private
+            # callback is attached only for the specialist backend and bridges
+            # normalized sidecar events without changing the public contract.
+            context.specialist_event_notifier = lambda event: bridge.put(
+                ("specialist", event)
+            )
 
         def execute() -> None:
             try:
-                result = asyncio.run(self.executor.execute(context, invocation))
+                active_executor = executor or self.executor
+                result = asyncio.run(active_executor.execute(context, invocation))
                 bridge.put(("result", result))
             except BaseException as exc:
                 bridge.put(("error", exc))
@@ -977,6 +1156,11 @@ class RunCoordinator:
                 yield _activity(value)
             elif kind == "approval":
                 yield value
+            elif kind == "specialist":
+                # Runtime/audit still receives normalized progress metadata.
+                # Text is reconciled only from message.complete; see
+                # _stream_specialist for the upstream interim semantics.
+                continue
             elif kind == "result":
                 result = value
             elif kind == "error":
@@ -1113,6 +1297,19 @@ class NativeSessionService:
                 and generation.session_id == self._session_id
                 and not generation.cancelled.is_set()
             )
+
+    def cancel_generation(self, session_id: str, generation_id: str) -> bool:
+        """Stop one generation without rotating or clearing its session."""
+        with self._state:
+            if session_id != self._session_id:
+                raise StaleSessionError(session_id, self._session_id)
+            active = self._active_generation
+            if active is None:
+                return False
+            if active.generation_id != generation_id:
+                raise StaleGenerationError("The requested generation is no longer active.")
+            active.cancelled.set()
+            return True
 
     def stream(
         self,

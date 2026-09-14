@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Settings, Paperclip, X, Minus, Zap, Cloud, Monitor, Trash2, AlertTriangle, ChevronRight, ChevronDown, Plus, Mic } from "lucide-react";
+import { Settings, Paperclip, X, Minus, Zap, Cloud, Monitor, Trash2, AlertTriangle, ChevronRight, ChevronDown, Plus, Mic, ArrowUp, ArrowDown, Square } from "lucide-react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -18,6 +18,34 @@ type Attachment = {
 
 type ExecutionPolicy = "always_ask" | "auto_run" | "deny_all";
 type CloudWorkspaceEgress = "deny" | "allow";
+type ResponseMode = "direct" | "hermes";
+type HermesCapability =
+  | "research"
+  | "vision"
+  | "coding_fixture"
+  | "browser_fixture"
+  | "delegation_fixture";
+
+type HermesStatus = {
+  enabled: boolean;
+  available: boolean;
+  configured: boolean;
+  running: boolean;
+  state:
+    | "disabled"
+    | "unconfigured"
+    | "stopped"
+    | "starting"
+    | "ready"
+    | "busy"
+    | "error"
+    | "closed"
+    | "unavailable";
+  ready: boolean;
+  version: string | null;
+  error: string | null;
+  capabilities: HermesCapability[];
+};
 
 type ModelConfig = {
   id: string;
@@ -54,7 +82,11 @@ type ChatMessage = {
   attachments?: Attachment[];
   generationId?: string;
   thoughtProcess?: string;
-  status?: "streaming" | "done" | "error";
+  status?: "streaming" | "done" | "error" | "stopped";
+  specialist?: {
+    runtime: "Hermes";
+    capability: HermesCapability;
+  };
 };
 
 type ChatEvent = {
@@ -72,6 +104,11 @@ type ChatEvent = {
   arguments?: Record<string, unknown> & { language?: string; code?: string };
   invocation_hash?: string;
   expires_at?: string;
+  fallback?: {
+    mode?: "direct";
+    automatic?: boolean;
+    safe_before_execution?: boolean;
+  };
   activity?: {
     event?: string;
     sequence?: number;
@@ -109,6 +146,64 @@ type DaemonStatus = {
 };
 
 type WindowMode = "compact" | "compactTall" | "expanded";
+
+const HERMES_CAPABILITIES: ReadonlyArray<{
+  value: HermesCapability;
+  label: string;
+  requiresImage?: boolean;
+  effectfulFixture?: boolean;
+}> = [
+  { value: "research", label: "Research" },
+  { value: "vision", label: "Vision", requiresImage: true },
+  { value: "coding_fixture", label: "Coding fixture", effectfulFixture: true },
+  { value: "browser_fixture", label: "Browser fixture", effectfulFixture: true },
+  { value: "delegation_fixture", label: "Delegation fixture", effectfulFixture: true },
+];
+
+const HERMES_CAPABILITY_VALUES = new Set<HermesCapability>(
+  HERMES_CAPABILITIES.map(({ value }) => value)
+);
+
+const DEFAULT_HERMES_STATUS: HermesStatus = {
+  enabled: false,
+  available: false,
+  configured: false,
+  running: false,
+  state: "stopped",
+  ready: false,
+  version: null,
+  error: null,
+  capabilities: [],
+};
+
+type DirectFallbackDraft = {
+  prompt: string;
+  attachments: Attachment[];
+};
+
+const isHermesCapability = (value: unknown): value is HermesCapability =>
+  typeof value === "string" && HERMES_CAPABILITY_VALUES.has(value as HermesCapability);
+
+const hermesStatusLabel = (status: HermesStatus, loading: boolean) => {
+  if (loading) return "Checking Hermes…";
+  // The state is authoritative when the status endpoint itself is unavailable:
+  // its fallback intentionally has enabled=false but must not look "disabled".
+  if (status.state === "unavailable") {
+    return status.error || "Hermes runtime is unavailable";
+  }
+  if (status.state === "disabled" || !status.enabled) return "Hermes is disabled";
+  if (status.state === "unconfigured" || !status.configured) return "Hermes is not configured";
+  if (!status.available) return status.error || "Hermes runtime is unavailable";
+  if (status.state === "error") {
+    return status.error ? `Hermes error: ${status.error}` : "Hermes reported an error";
+  }
+  if (status.state === "closed") return "Hermes runtime is closed";
+  if (status.state === "starting") return "Hermes is starting";
+  if (status.state === "busy") return "Hermes is working";
+  if (status.ready || status.state === "ready") return "Hermes is ready";
+  if (status.capabilities.length === 0) return "Hermes has no enabled capabilities";
+  return "Hermes will start when selected";
+};
 
 const createGenerationId = () => {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -164,12 +259,17 @@ function App() {
   const [isResetting, setIsResetting] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
+  const [directFallbackDraft, setDirectFallbackDraft] = useState<DirectFallbackDraft | null>(null);
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [approvalSubmitting, setApprovalSubmitting] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(1.0);
   const [expandedThoughts, setExpandedThoughts] = useState<Set<string>>(() => new Set());
+  const [responseMode, setResponseMode] = useState<ResponseMode>("direct");
+  const [hermesCapability, setHermesCapability] = useState<HermesCapability>("research");
+  const [hermesStatus, setHermesStatus] = useState<HermesStatus>(DEFAULT_HERMES_STATUS);
+  const [hermesStatusLoading, setHermesStatusLoading] = useState(true);
   const wsRef = useRef<WebSocket | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const generationIdRef = useRef<string | null>(null);
@@ -184,7 +284,12 @@ function App() {
   const showSettingsRef = useRef(false);
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const settingsPanelRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const chatHistoryRef = useRef<HTMLDivElement>(null);
+  const followMessagesRef = useRef(true);
+  const [showScrollToLatest, setShowScrollToLatest] = useState(false);
+  const [isStreaming, setIsStreamingState] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
   const endOfMessagesRef = useRef<HTMLDivElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -194,9 +299,16 @@ function App() {
   const voiceStopRequestedRef = useRef(false);
   const voiceTimeoutRef = useRef<number | null>(null);
   const isTranscribingRef = useRef(false);
+  const specialistGenerationsRef = useRef<Set<string>>(new Set());
+  const specialistDraftsRef = useRef<Map<string, DirectFallbackDraft>>(new Map());
 
   // Settings state
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<"general" | "models" | "personal" | "advanced">("general");
+  const [voiceConfig, setVoiceConfig] = useState({ provider: "local", base_url: "http://127.0.0.1:8000/v1", model: "Systran/faster-whisper-small", language: "" });
+  const [voiceDirty, setVoiceDirty] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [models, setModels] = useState<ModelConfig[]>([]);
   const [activeModel, setActiveModel] = useState("");
   const [activeProvider, setActiveProvider] = useState("cloud");
@@ -205,6 +317,10 @@ function App() {
   const [serverUrl, setServerUrl] = useState(""); // Local models only
   const [executionPolicy, setExecutionPolicy] = useState<ExecutionPolicy>("always_ask");
   const [cloudWorkspaceEgress, setCloudWorkspaceEgress] = useState<CloudWorkspaceEgress>("deny");
+  const [hermesEnabled, setHermesEnabled] = useState(false);
+  const [hermesRuntimePath, setHermesRuntimePath] = useState("");
+  const [hermesHomePath, setHermesHomePath] = useState("");
+  const [hermesAllowEffectfulFixture, setHermesAllowEffectfulFixture] = useState(false);
 
   // User-configurable application settings
   const [theme, setTheme] = useState<ThemeName>("Default");
@@ -219,14 +335,45 @@ function App() {
   const [editingRoutineId, setEditingRoutineId] = useState<string | null>(null);
   const [personalDataError, setPersonalDataError] = useState<string | null>(null);
 
-  const windowMode: WindowMode = messages.length > 0 || showSettings || pendingApproval !== null || sessionError !== null
+  const hasImageAttachment = attachments.some((attachment) => attachment.kind === "image");
+  const advertisedHermesCapabilities = new Set(hermesStatus.capabilities);
+  const hermesCapabilityOptions = HERMES_CAPABILITIES.filter((capability) => {
+    if (capability.requiresImage && !hasImageAttachment) return false;
+    if (capability.effectfulFixture && !hermesAllowEffectfulFixture) return false;
+    return advertisedHermesCapabilities.has(capability.value);
+  });
+  const effectiveHermesCapability = hermesCapabilityOptions.some(
+    ({ value }) => value === hermesCapability
+  )
+    ? hermesCapability
+    : hermesCapabilityOptions[0]?.value || "research";
+  const hermesSelectable =
+    hermesEnabled &&
+    hermesStatus.enabled &&
+    hermesStatus.available &&
+    hermesStatus.configured &&
+    advertisedHermesCapabilities.has(effectiveHermesCapability) &&
+    hermesStatus.state !== "error" &&
+    hermesStatus.state !== "closed";
+  const currentHermesStatusLabel = hermesStatusLabel(hermesStatus, hermesStatusLoading);
+
+  useEffect(() => {
+    if (responseMode === "hermes" && !hermesStatusLoading && !hermesSelectable) {
+      setResponseMode("direct");
+      setSessionError("Hermes Advanced became unavailable. Direct mode was selected and your draft was kept.");
+    }
+  }, [hermesSelectable, hermesStatusLoading, responseMode]);
+
+  const windowMode: WindowMode = messages.length > 0 || showSettings || pendingApproval !== null || sessionError !== null || input.includes("\n") || input.length > 160 || (attachments.length > 0 && hermesEnabled)
     ? "expanded"
-    : attachments.length > 0
+    : attachments.length > 0 || hermesEnabled
       ? "compactTall"
       : "compact";
 
   const setStreaming = useCallback((value: boolean) => {
     isStreamingRef.current = value;
+    setIsStreamingState(value);
+    if (!value) setIsCancelling(false);
   }, []);
 
   const releaseVoiceStream = useCallback(() => {
@@ -348,6 +495,11 @@ function App() {
     setMessages([]);
     setInput("");
     setAttachments([]);
+    setResponseMode("direct");
+    setHermesCapability("research");
+    specialistGenerationsRef.current.clear();
+    specialistDraftsRef.current.clear();
+    setDirectFallbackDraft(null);
     setPendingApproval(null);
     setApprovalSubmitting(false);
     setStreaming(false);
@@ -476,8 +628,17 @@ function App() {
   }, []);
 
   useEffect(() => {
-    endOfMessagesRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (followMessagesRef.current) {
+      endOfMessagesRef.current?.scrollIntoView({ behavior: "instant" });
+    }
   }, [messages]);
+
+  useEffect(() => {
+    const textarea = inputRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
+  }, [input, windowMode]);
 
   useEffect(() => {
     showSettingsRef.current = showSettings;
@@ -500,9 +661,9 @@ function App() {
     const panel = settingsPanelRef.current;
     const getFocusable = () => Array.from(
       panel?.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])'
       ) ?? []
-    );
+    ).filter((element) => element.getClientRects().length > 0);
     window.setTimeout(() => getFocusable()[0]?.focus(), 0);
 
     const handleDialogKeyDown = (event: KeyboardEvent) => {
@@ -533,6 +694,46 @@ function App() {
     };
   }, [showSettings]);
 
+  const loadHermesStatus = async (): Promise<HermesStatus | null> => {
+    setHermesStatusLoading(true);
+    try {
+      const response = await daemonFetch("/specialists/hermes/status");
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json() as Record<string, unknown>;
+      const state = ["disabled", "unconfigured", "stopped", "starting", "ready", "busy", "error", "closed", "unavailable"].includes(
+        String(data.state)
+      )
+        ? data.state as HermesStatus["state"]
+        : "stopped";
+      const status: HermesStatus = {
+        enabled: data.enabled === true,
+        available: data.available === true,
+        configured: data.configured === true,
+        running: data.running === true,
+        state,
+        ready: data.ready === true || state === "ready",
+        version: typeof data.version === "string" ? data.version : null,
+        error: typeof data.error === "string" ? data.error : null,
+        capabilities: Array.isArray(data.capabilities)
+          ? data.capabilities.filter(isHermesCapability)
+          : [],
+      };
+      setHermesStatus(status);
+      return status;
+    } catch (error) {
+      console.error("Failed to read Hermes status", error);
+      setHermesStatus({
+        ...DEFAULT_HERMES_STATUS,
+        enabled: hermesEnabled,
+        state: "unavailable",
+        error: "Hermes status is unavailable.",
+      });
+      return null;
+    } finally {
+      setHermesStatusLoading(false);
+    }
+  };
+
   const loadSettings = async () => {
     try {
       const res = await daemonFetch("/settings");
@@ -542,12 +743,20 @@ function App() {
         setActiveModel(data.active_model || "");
         setTheme(normalizeThemeName(data.theme));
         setWorkspacePath(data.workspace_path || "");
+        if (data.voice) {
+          setVoiceConfig({ provider: data.voice.provider === "gemini" ? "gemini" : "local", base_url: data.voice.base_url || "http://127.0.0.1:8000/v1", model: data.voice.model || "Systran/faster-whisper-small", language: data.voice.language || "" });
+          setVoiceDirty(false);
+        }
         setExecutionPolicy(
           ["always_ask", "auto_run", "deny_all"].includes(data.execution_policy)
             ? data.execution_policy
             : "always_ask"
         );
         setCloudWorkspaceEgress(data.cloud_workspace_egress === "allow" ? "allow" : "deny");
+        setHermesEnabled(data.hermes_enabled === true);
+        setHermesRuntimePath(typeof data.hermes_runtime_path === "string" ? data.hermes_runtime_path : "");
+        setHermesHomePath(typeof data.hermes_home_path === "string" ? data.hermes_home_path : "");
+        setHermesAllowEffectfulFixture(data.hermes_allow_effectful_fixture === true);
         // Populate fields from the active model config
         const config = data.active_model_config;
         if (config) {
@@ -572,6 +781,7 @@ function App() {
 
   useEffect(() => {
     void loadSettings();
+    void loadHermesStatus();
 
     let disposed = false;
     let reconnectTimer: number | undefined;
@@ -605,6 +815,7 @@ function App() {
         socketConnectedRef.current = true;
         console.log("Connected to Python daemon");
         void loadSettings();
+        void loadHermesStatus();
       };
 
       ws.onmessage = (event) => {
@@ -734,6 +945,9 @@ function App() {
                 };
           }));
         } else if (data.type === "done") {
+          const usedHermes = specialistGenerationsRef.current.delete(data.generation_id || "");
+          specialistDraftsRef.current.delete(data.generation_id || "");
+          if (usedHermes) void loadHermesStatus();
           setPendingApproval(null);
           setApprovalSubmitting(false);
           setStreaming(false);
@@ -743,15 +957,33 @@ function App() {
               : message
           ));
         } else if (data.type === "error") {
+          const usedHermes = specialistGenerationsRef.current.delete(data.generation_id || "");
+          const specialistDraft = specialistDraftsRef.current.get(data.generation_id || "");
+          specialistDraftsRef.current.delete(data.generation_id || "");
+          if (usedHermes && data.code !== "generation_cancelled") {
+            if (
+              data.fallback?.mode === "direct" &&
+              data.fallback.automatic === false &&
+              data.fallback.safe_before_execution === true &&
+              specialistDraft
+            ) {
+              setDirectFallbackDraft(specialistDraft);
+              setResponseMode("direct");
+            }
+            setSessionError(
+              data.text || "Hermes could not complete this request. Check its status and configuration."
+            );
+            void loadHermesStatus();
+          }
           setPendingApproval(null);
           setApprovalSubmitting(false);
           setStreaming(false);
           setMessages((prev) => prev.map((message) =>
-            message.generationId === data.generation_id
+            message.role === "assistant" && message.generationId === data.generation_id
               ? {
                   ...message,
-                  status: "error",
-                  content: `${message.content}${message.content ? "\n\n" : ""}Error: ${data.text || "response unavailable"}`,
+                  status: data.code === "generation_cancelled" ? "stopped" : "error",
+                  content: data.code === "generation_cancelled" ? message.content : `${message.content}${message.content ? "\n\n" : ""}Error: ${data.text || "response unavailable"}`,
                 }
               : message
           ));
@@ -981,15 +1213,34 @@ function App() {
   };
 
   const saveSettings = async () => {
+    if (isSavingSettings) return;
+    setIsSavingSettings(true);
+    setSettingsError(null);
     try {
+      if (voiceDirty) {
+        const voiceResponse = await daemonFetch("/settings/voice", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(voiceConfig),
+        });
+        if (!voiceResponse.ok) {
+          const error = await voiceResponse.json().catch(() => ({}));
+          throw new Error(error.detail?.message || "Voice settings could not be saved. Check the endpoint and model.");
+        }
+        setVoiceDirty(false);
+      }
       // Send the correct payload based on provider type
-      const payload: Record<string, string> = {
+      const payload: Record<string, string | boolean> = {
         model_id: activeModel,
         theme,
         workspace_path: workspacePath,
         model_string: modelString,
         execution_policy: executionPolicy,
         cloud_workspace_egress: cloudWorkspaceEgress,
+        hermes_enabled: hermesEnabled,
+        hermes_runtime_path: hermesRuntimePath.trim(),
+        hermes_home_path: hermesHomePath.trim(),
+        hermes_allow_effectful_fixture: hermesAllowEffectfulFixture,
       };
       if (activeProvider === "local") {
         payload.api_base = serverUrl;
@@ -1008,16 +1259,22 @@ function App() {
       setExecutionPolicy(saved.execution_policy || executionPolicy);
       setApiKey("");
       await loadSettings();
+      await loadHermesStatus();
+      if (!hermesEnabled) setResponseMode("direct");
       setShowSettings(false);
     } catch (error) {
       console.error("Failed to save settings", error);
-      setSessionError("Settings were not saved. Correct the data and try again.");
+      setSettingsError(error instanceof Error ? error.message : "Settings could not be saved. Check the values and try again.");
+    } finally {
+      setIsSavingSettings(false);
     }
   };
 
   const handleOpenSettings = () => {
+    setSettingsError(null);
     setShowSettings(true);
     void loadSettings();
+    void loadHermesStatus();
     void loadPersonalData();
   };
 
@@ -1249,9 +1506,47 @@ function App() {
     });
   };
 
+  const restoreDirectFallback = () => {
+    if (!directFallbackDraft || isStreamingRef.current || isResetting) return;
+    setResponseMode("direct");
+    setInput(directFallbackDraft.prompt);
+    setAttachments([...directFallbackDraft.attachments]);
+    setDirectFallbackDraft(null);
+    setSessionError("The request was restored in Direct mode. Review it and send it again.");
+    window.setTimeout(() => inputRef.current?.focus(), 0);
+  };
+
+  const cancelGeneration = async () => {
+    const generation = generationIdRef.current;
+    if (!generation || !sessionIdRef.current || isCancelling) return;
+    setIsCancelling(true);
+    try {
+      const response = await daemonFetch("/session/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionIdRef.current, generation_id: generation }),
+      });
+      if (!response.ok) throw new Error("The response could not be stopped. Try again.");
+    } catch (error) {
+      if (generationIdRef.current === generation) {
+        setSessionError(error instanceof Error ? error.message : "The response could not be stopped.");
+        setIsCancelling(false);
+      }
+    }
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if ((!input.trim() && attachments.length === 0) || isStreamingRef.current || isResetting) return;
+    if ((!input.trim() && attachments.length === 0) || isStreamingRef.current || isResetting || isRecording || isTranscribing) return;
+
+    const useHermes = responseMode === "hermes";
+    if (useHermes && !hermesSelectable) {
+      setSessionError(
+        "Hermes is unavailable or not configured. Use Direct mode or review Hermes settings."
+      );
+      void loadHermesStatus();
+      return;
+    }
 
     const ws = wsRef.current;
     const currentSessionId = sessionIdRef.current;
@@ -1261,8 +1556,18 @@ function App() {
     }
 
     const userMsg = input.trim();
+    followMessagesRef.current = true;
+    setShowScrollToLatest(false);
     const msgAttachments = attachments.length > 0 ? [...attachments] : undefined;
     const generationId = createGenerationId();
+    setDirectFallbackDraft(null);
+    if (useHermes) {
+      specialistGenerationsRef.current.add(generationId);
+      specialistDraftsRef.current.set(generationId, {
+        prompt: userMsg,
+        attachments: msgAttachments ? [...msgAttachments] : [],
+      });
+    }
     generationIdRef.current = generationId;
     setSessionError(null);
     setMessages((prev) => [
@@ -1273,6 +1578,9 @@ function App() {
         content: userMsg,
         attachments: msgAttachments,
         generationId,
+        specialist: useHermes
+          ? { runtime: "Hermes", capability: effectiveHermesCapability }
+          : undefined,
       },
       {
         id: `${generationId}:assistant`,
@@ -1285,14 +1593,20 @@ function App() {
     ]);
     setStreaming(true);
     try {
-      ws.send(JSON.stringify({
+      const request: Record<string, unknown> = {
         prompt: userMsg,
         attachments,
         session_id: currentSessionId,
         generation_id: generationId,
-      }));
+      };
+      if (useHermes) {
+        request.route = { specialist_capability: effectiveHermesCapability };
+      }
+      ws.send(JSON.stringify(request));
     } catch (error) {
       console.error("Failed to send prompt", error);
+      specialistGenerationsRef.current.delete(generationId);
+      specialistDraftsRef.current.delete(generationId);
       generationIdRef.current = null;
       setStreaming(false);
       setMessages((prev) => prev.map((message) =>
@@ -1305,6 +1619,7 @@ function App() {
           : message
       ));
       setSessionError("Message could not be sent. Check the connection to Jarvs Spotlight and try again.");
+      return;
     }
 
     setInput("");
@@ -1347,7 +1662,7 @@ function App() {
             className="settings-panel rounded-xl animate-slide-up flex flex-col min-h-0 overflow-hidden"
             style={{
               zoom: zoomLevel,
-              width: `min(400px, calc(${100 / zoomLevel}vw - ${24 / zoomLevel}px))`,
+              width: `min(560px, calc(${100 / zoomLevel}vw - ${24 / zoomLevel}px))`,
               maxHeight: `calc(${100 / zoomLevel}dvh - ${24 / zoomLevel}px)`,
             }}
             role="dialog"
@@ -1356,7 +1671,7 @@ function App() {
           >
             <div className="flex justify-between items-center shrink-0 px-4 pt-4 pb-3 sm:px-5 border-b border-jarvs-border">
               <h2 className="text-base font-semibold tracking-wide">
-                {showAddModel ? "Add New Model" : "Jarvs Spotlight Settings"}
+                {showAddModel ? "Add model" : "Settings"}
               </h2>
               <button
                 type="button"
@@ -1369,10 +1684,20 @@ function App() {
               </button>
             </div>
 
+            {!showAddModel && (
+              <nav className="settings-tabs" aria-label="Settings sections">
+                {(["general", "models", "personal", "advanced"] as const).map((tab) => (
+                  <button type="button" key={tab} aria-current={settingsTab === tab ? "page" : undefined} onClick={() => setSettingsTab(tab)}>
+                    {tab === "personal" ? "Memory & routines" : tab.charAt(0).toUpperCase() + tab.slice(1)}
+                  </button>
+                ))}
+              </nav>
+            )}
             <div className="settings-panel__body min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5">
               {!showAddModel ? (
                 <>
                 {/* General Settings */}
+                <div hidden={settingsTab !== "general"}>
                 <label className="block text-xs font-semibold text-jarvs-text mb-1.5 tracking-wider">Theme:</label>
                 <select
                   value={theme}
@@ -1427,7 +1752,116 @@ function App() {
                 <p id="workspace-egress-description" className="theme-description mb-5 mt-1.5 text-[11px] leading-relaxed text-jarvs-text-muted">
                   This setting is separate from execution: a file can be read locally without sending its contents to the cloud provider.
                 </p>
+                <details className="settings-disclosure">
+                  <summary>Voice input</summary>
+                  <p className="settings-section-description">Use the microphone button or hold F4 to dictate a message.</p>
+                  <label className="settings-field">Transcription
+                    <select className="settings-control" value={voiceConfig.provider} onChange={(event) => { setVoiceConfig((current) => ({ ...current, provider: event.target.value })); setVoiceDirty(true); }}>
+                      <option value="local">Local speech server</option>
+                      <option value="gemini">Gemini cloud</option>
+                    </select>
+                  </label>
+                  {voiceConfig.provider === "local" ? (
+                    <>
+                      <p className="settings-section-description">Requires a running OpenAI-compatible speech server, such as Speaches. Jarvs connects when you dictate; it does not start the server.</p>
+                      <label className="settings-field">Server address
+                        <input className="settings-control" value={voiceConfig.base_url} onChange={(event) => { setVoiceConfig((current) => ({ ...current, base_url: event.target.value })); setVoiceDirty(true); }} placeholder="http://127.0.0.1:8000/v1" />
+                      </label>
+                      <label className="settings-field">Speech model
+                        <input className="settings-control" value={voiceConfig.model} onChange={(event) => { setVoiceConfig((current) => ({ ...current, model: event.target.value })); setVoiceDirty(true); }} />
+                      </label>
+                    </>
+                  ) : <p className="settings-section-description">Audio is sent to Gemini using your configured Gemini API key.</p>}
+                  <label className="settings-field">Language (optional)
+                    <input className="settings-control" value={voiceConfig.language} onChange={(event) => { setVoiceConfig((current) => ({ ...current, language: event.target.value })); setVoiceDirty(true); }} placeholder="Auto-detect, or a code such as it" />
+                  </label>
+                </details>
+                </div>
 
+                <div hidden={settingsTab !== "advanced"}>
+                <p className="settings-section-description">Optional integrations for experimental workflows.</p>
+                <section className="hermes-settings mb-5 rounded-lg border border-jarvs-border-strong p-3" aria-labelledby="hermes-settings-title">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 id="hermes-settings-title" className="text-sm font-semibold text-jarvs-text">Hermes specialist</h3>
+                      <p className="mt-1 text-[11px] leading-relaxed text-jarvs-text-muted">
+                        Optional, lazy runtime for explicit research, vision, and controlled fixture workflows. Direct remains the default.
+                      </p>
+                    </div>
+                    <label className="hermes-enabled-control shrink-0">
+                      <input
+                        type="checkbox"
+                        checked={hermesEnabled}
+                        onChange={(event) => {
+                          setHermesEnabled(event.target.checked);
+                          if (!event.target.checked) setResponseMode("direct");
+                        }}
+                      />
+                      <span>Enabled</span>
+                    </label>
+                  </div>
+
+                  <div className="hermes-status-row mt-3" role="status" aria-live="polite">
+                    <span className={`hermes-status-dot hermes-status-dot--${hermesStatus.state}`} aria-hidden="true" />
+                    <span className="hermes-status-message" title={hermesStatus.error || undefined}>{currentHermesStatusLabel}</span>
+                    <span className="ml-auto flex shrink-0 items-center gap-2">
+                      {hermesStatus.version && <span>v{hermesStatus.version}</span>}
+                      <button
+                        type="button"
+                        onClick={() => void loadHermesStatus()}
+                        disabled={hermesStatusLoading}
+                        className="settings-secondary rounded px-2 py-1 text-[10px] disabled:opacity-50"
+                      >
+                        Refresh
+                      </button>
+                    </span>
+                  </div>
+
+                  <label className="mt-3 block text-xs font-semibold text-jarvs-text" htmlFor="hermes-runtime-path">Runtime path</label>
+                  <input
+                    id="hermes-runtime-path"
+                    type="text"
+                    value={hermesRuntimePath}
+                    onChange={(event) => setHermesRuntimePath(event.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="settings-control mt-1 w-full rounded-lg border border-jarvs-border-strong p-2 text-xs outline-none transition focus:border-jarvs-accent"
+                    placeholder="Pinned Hermes checkout root or venv Python"
+                  />
+
+                  <label className="mt-3 block text-xs font-semibold text-jarvs-text" htmlFor="hermes-home-path">Isolated data directory</label>
+                  <input
+                    id="hermes-home-path"
+                    type="text"
+                    value={hermesHomePath}
+                    onChange={(event) => setHermesHomePath(event.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="settings-control mt-1 w-full rounded-lg border border-jarvs-border-strong p-2 text-xs outline-none transition focus:border-jarvs-accent"
+                    placeholder="Dedicated Hermes home directory"
+                  />
+                  <p className="mt-1 text-[10px] leading-relaxed text-jarvs-text-muted">
+                    Paths remain local settings and are never sent with chat messages.
+                  </p>
+
+                  <label className="hermes-fixture-control mt-3">
+                    <input
+                      type="checkbox"
+                      checked={hermesAllowEffectfulFixture}
+                      onChange={(event) => setHermesAllowEffectfulFixture(event.target.checked)}
+                      aria-describedby="hermes-fixture-warning"
+                    />
+                    <span>
+                      Enable effectful fixture capabilities
+                      <small id="hermes-fixture-warning">
+                        These capabilities may execute commands, change files, or act through a browser. The workspace marker and Jarvs approvals are policy gates, not a sandbox. Use only a disposable workspace containing <code>.jarvs-hermes-fixture</code>.
+                      </small>
+                    </span>
+                  </label>
+                </section>
+                </div>
+
+                <div hidden={settingsTab !== "personal"}>
                 <details className="mb-4 rounded-lg border border-jarvs-border-strong p-3">
                   <summary className="cursor-pointer text-sm font-semibold text-jarvs-text">Personal Memory</summary>
                   <p className="mb-3 mt-2 text-[11px] leading-relaxed text-jarvs-text-muted">
@@ -1512,9 +1946,11 @@ function App() {
                       </button>
                     </div>
                   </div>
-                  {personalDataError && <p className="mt-2 text-[11px] text-jarvs-text-muted">{personalDataError}</p>}
                 </details>
 
+                {personalDataError && <p role="alert" className="session-alert rounded-lg p-3 text-xs">{personalDataError}</p>}
+                </div>
+                <div hidden={settingsTab !== "models"}>
                 <div className="flex items-center gap-2 mb-3">
                   <Zap size={14} className="text-jarvs-accent" />
                   <h3 className="font-semibold text-sm text-jarvs-text">Model Configuration</h3>
@@ -1575,6 +2011,7 @@ function App() {
                     <button onClick={handleDeleteModel} className="danger-button px-2 py-1 border rounded text-xs transition flex items-center gap-1"><Trash2 size={12} /> Delete</button>
                   </div>
                 </div>
+                </div>
                 </>
               ) : (
                 <>
@@ -1610,7 +2047,7 @@ function App() {
                   {newModel.provider === "local" ? "Server URL:" : "API Key:"}
                 </label>
                 <input
-                  type="text"
+                  type={newModel.provider === "local" ? "text" : "password"}
                   value={newModel.urlOrKey}
                   onChange={(e) => setNewModel(prev => ({...prev, urlOrKey: e.target.value}))}
                   className="settings-control w-full border border-jarvs-border-strong rounded-lg p-2 outline-none text-sm mb-6 transition focus:border-jarvs-accent"
@@ -1621,10 +2058,11 @@ function App() {
             </div>
 
             <div className={`settings-panel__footer shrink-0 flex flex-wrap gap-2 border-t border-jarvs-border-strong px-4 py-3 sm:px-5 ${showAddModel ? "justify-end" : "justify-between"}`}>
+              {settingsError && <p role="alert" className="session-alert w-full rounded-lg p-2 text-xs">{settingsError}</p>}
               {!showAddModel ? (
                 <>
                   <button onClick={() => void handleQuit()} className="danger-button danger-button--filled px-3.5 py-1.5 rounded-lg transition text-sm font-medium">Quit Jarvs Spotlight</button>
-                  <button onClick={saveSettings} className="px-4 py-1.5 rounded-lg bg-green-600/80 hover:bg-green-600 transition text-sm font-medium text-white">Save & Apply</button>
+                  <button onClick={saveSettings} disabled={isSavingSettings} className="accent-button px-4 py-1.5 rounded-lg bg-jarvs-accent hover:bg-jarvs-accent-hover transition text-sm font-medium disabled:opacity-50">{isSavingSettings ? "Saving…" : "Save changes"}</button>
                 </>
               ) : (
                 <>
@@ -1642,9 +2080,7 @@ function App() {
         <div className="min-w-0 flex-1 text-sm font-medium flex items-center gap-2 pointer-events-none">
           <img className="brand-logo shrink-0" src="/jarvs-logo.png" alt="" aria-hidden="true" draggable={false} />
           <span className="brand-mark shrink-0">Jarvs Spotlight</span>
-          {activeModel && (
-            <span className="min-w-0 truncate text-[11px] text-jarvs-text-muted ml-1 font-normal">· {activeModel}</span>
-          )}
+
         </div>
         <div className="flex items-center gap-0.5 shrink-0">
           <button
@@ -1660,10 +2096,10 @@ function App() {
           <button ref={settingsButtonRef} onClick={handleOpenSettings} className="p-1.5 hover:bg-jarvs-surface-hover rounded-md transition text-jarvs-text-muted hover:text-jarvs-text" title="Settings" aria-label="Open settings">
             <Settings size={13} />
           </button>
-          <button onClick={() => void getCurrentWindow().hide()} className="p-1.5 hover:bg-jarvs-surface-hover rounded-md transition text-jarvs-text-muted hover:text-jarvs-text" title="Hide Jarvs Spotlight" aria-label="Hide Jarvs Spotlight">
+          <button hidden={!isTauri()} onClick={() => void getCurrentWindow().hide()} className="p-1.5 hover:bg-jarvs-surface-hover rounded-md transition text-jarvs-text-muted hover:text-jarvs-text" title="Hide Jarvs Spotlight" aria-label="Hide Jarvs Spotlight">
             <Minus size={13} />
           </button>
-          <button onClick={() => void getCurrentWindow().close()} className="p-1.5 hover:bg-red-500/60 rounded-md transition text-jarvs-text-muted hover:text-white" title="Close chat" aria-label="Close the chat and hide Jarvs Spotlight">
+          <button hidden={!isTauri()} onClick={() => void getCurrentWindow().close()} className="p-1.5 hover:bg-red-500/60 rounded-md transition text-jarvs-text-muted hover:text-white" title="Close chat" aria-label="Close the chat and hide Jarvs Spotlight">
             <X size={13} />
           </button>
         </div>
@@ -1676,9 +2112,21 @@ function App() {
         <div role="alert" className="session-alert mx-4 mt-3 px-3 py-2 flex items-start gap-2 rounded-lg border text-xs shrink-0">
           <AlertTriangle size={14} className="session-alert__icon mt-0.5 shrink-0" />
           <span className="flex-1">{sessionError}</span>
+          {directFallbackDraft && (
+            <button
+              type="button"
+              onClick={restoreDirectFallback}
+              className="session-alert__action shrink-0 rounded-md border px-2 py-1 font-semibold"
+            >
+              Use Direct
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => setSessionError(null)}
+            onClick={() => {
+              setSessionError(null);
+              setDirectFallbackDraft(null);
+            }}
             className="session-alert__dismiss p-0.5 rounded"
             title="Dismiss alert"
             aria-label="Dismiss alert"
@@ -1689,20 +2137,20 @@ function App() {
       )}
 
       {/* Chat History */}
-      <div className="chat-history flex-1 overflow-y-auto px-4 py-3 space-y-3 flex flex-col min-h-0">
+      <div ref={chatHistoryRef}
+        aria-label="Conversation"
+        onScroll={() => {
+          const history = chatHistoryRef.current;
+          if (!history) return;
+          const nearBottom = history.scrollHeight - history.scrollTop - history.clientHeight < 64;
+          followMessagesRef.current = nearBottom;
+          setShowScrollToLatest(!nearBottom);
+        }}
+        className="chat-history flex-1 overflow-y-auto px-4 py-3 space-y-3 flex flex-col min-h-0">
         {messages.length === 0 && (
-          <div className="jarvs-empty m-auto text-jarvs-text-muted text-sm flex flex-col items-center gap-2.5">
-            <div className="jarvs-core" aria-hidden="true">
-              <span className="jarvs-core__ring jarvs-core__ring--outer" />
-              <span className="jarvs-core__ring jarvs-core__ring--middle" />
-              <span className="jarvs-core__center">
-                <span className="jarvs-core__signal">
-                  <i /><i /><i /><i /><i />
-                </span>
-              </span>
-            </div>
-            <p className="jarvs-empty__eyebrow">JARVS SPOTLIGHT</p>
-            <p className="text-xs m-0">How can I help?</p>
+          <div className="jarvs-empty m-auto text-center">
+            <h1>What can I help with?</h1>
+            <p>Ask a question, work on a file, or think something through.</p>
           </div>
         )}
         {messages.map((msg) => (
@@ -1719,6 +2167,12 @@ function App() {
                 {msg.content && (
                   <p className="whitespace-pre-wrap text-sm m-0 leading-relaxed">{msg.content}</p>
                 )}
+                {msg.status === "stopped" && <p className="not-prose text-xs text-jarvs-text-muted m-0">Response stopped</p>}
+                {msg.specialist && (
+                  <span className="specialist-message-badge">
+                    {msg.specialist.runtime} · {HERMES_CAPABILITIES.find(({ value }) => value === msg.specialist?.capability)?.label || msg.specialist.capability}
+                  </span>
+                )}
                 {msg.attachments && msg.attachments.length > 0 && (
                   <div className="flex flex-wrap gap-1 mt-0.5">
                     {msg.attachments.map((att, i) => (
@@ -1732,7 +2186,7 @@ function App() {
               </div>
             ) : (
               <div className="flex flex-col gap-2">
-                <div className="thought-process not-prose">
+                {(msg.thoughtProcess || msg.status === "streaming") && <div className="thought-process not-prose">
                   <button
                     type="button"
                     onClick={() => toggleThought(msg.id)}
@@ -1743,7 +2197,7 @@ function App() {
                     {msg.status === "streaming" && (
                       <span className="w-1.5 h-1.5 rounded-full bg-jarvs-accent ai-pulse shrink-0" />
                     )}
-                    <span>{msg.status === "streaming" ? "Activity…" : "Activity trace"}</span>
+                    <span>{msg.status === "streaming" ? "Activity…" : "View activity"}</span>
                   </button>
                   {expandedThoughts.has(msg.id) && (
                     <div className="thought-process__content ml-5 mt-1 pl-2 border-l border-jarvs-border text-[11px] text-jarvs-text-muted">
@@ -1761,6 +2215,7 @@ function App() {
                     </div>
                   )}
                 </div>
+                }
                 {msg.content && (
                   <div className="msg-content-scroll">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>
@@ -1795,8 +2250,81 @@ function App() {
       )}
 
       {/* Input */}
-      <div className="p-3 shrink-0">
-        <form onSubmit={handleSubmit} className="input-glow flex gap-2 items-center bg-jarvs-surface border border-jarvs-border rounded-xl px-3 py-2 transition-all">
+      {showScrollToLatest && (
+        <button type="button" className="scroll-to-latest" onClick={() => {
+          followMessagesRef.current = true;
+          endOfMessagesRef.current?.scrollIntoView({ behavior: "instant" });
+          setShowScrollToLatest(false);
+        }} aria-label="Scroll to latest message"><ArrowDown size={15} /> Latest</button>
+      )}
+      <div className="composer-wrapper shrink-0">
+        {hermesEnabled && (
+        <div className="specialist-controls mb-2 flex flex-wrap items-center gap-2">
+          <div className="mode-switch" role="group" aria-label="Response mode">
+            <button
+              type="button"
+              className={responseMode === "direct" ? "is-active" : ""}
+              aria-pressed={responseMode === "direct"}
+              onClick={() => setResponseMode("direct")}
+            >
+              Direct
+            </button>
+            <button
+              type="button"
+              className={responseMode === "hermes" ? "is-active" : ""}
+              aria-pressed={responseMode === "hermes"}
+              aria-describedby="hermes-compose-status"
+              disabled={!hermesSelectable || hermesStatusLoading}
+              onClick={() => setResponseMode("hermes")}
+            >
+              Hermes Advanced
+            </button>
+          </div>
+          {responseMode === "hermes" && (
+            <label className="hermes-capability-select">
+              <span className="sr-only">Hermes capability</span>
+              <select
+                value={effectiveHermesCapability}
+                onChange={(event) => setHermesCapability(event.target.value as HermesCapability)}
+                aria-label="Hermes capability"
+              >
+                {hermesCapabilityOptions.map((capability) => (
+                  <option key={capability.value} value={capability.value}>{capability.label}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          <span
+            id="hermes-compose-status"
+            className={`hermes-compose-status ${hermesSelectable ? "is-available" : ""}`}
+            role="status"
+            aria-live="polite"
+          >
+            {responseMode === "hermes"
+              ? `Hermes Advanced · ${HERMES_CAPABILITIES.find(({ value }) => value === effectiveHermesCapability)?.label || effectiveHermesCapability}`
+              : currentHermesStatusLabel}
+          </span>
+        </div>
+        )}
+        <form onSubmit={handleSubmit} className="composer input-glow bg-jarvs-surface border border-jarvs-border transition-all">
+          <textarea
+            ref={inputRef}
+            rows={1}
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              }
+            }}
+            placeholder={isRecording ? "Recording…" : isTranscribing ? "Transcribing…" : isResetting ? "Starting a new chat…" : sessionId ? "Ask anything…" : "Connecting to Jarvs…"}
+            aria-label="Message Jarvs"
+            className="composer-input"
+            disabled={isResetting || !sessionId}
+            autoFocus
+          />
+          <div className="composer-toolbar">
           <button
             type="button"
             onClick={handleAttachFile}
@@ -1820,16 +2348,17 @@ function App() {
           >
             <Mic size={16} />
           </button>
-          <input
-            ref={inputRef}
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder={isRecording ? "Recording…" : isTranscribing ? "Transcribing…" : isResetting ? "Starting a new chat..." : sessionId ? "Ask Jarvs Spotlight..." : "Connecting to Jarvs Spotlight..."}
-            className="flex-1 bg-transparent text-jarvs-text text-sm border-none outline-none placeholder-jarvs-text-muted/50"
-            disabled={isResetting || !sessionId}
-            autoFocus
-          />
+          <button type="button" onClick={() => { setSettingsTab("models"); handleOpenSettings(); }} className="composer-model" title="Change model">
+            <span>{models.find((model) => model.id === activeModel)?.name || "Choose model"}</span>
+            <ChevronDown size={12} />
+          </button>
+          <span className="composer-keyboard-hint">Shift + Enter for a new line</span>
+          {isStreaming ? (
+            <button type="button" className="composer-send" onClick={() => void cancelGeneration()} disabled={isCancelling} aria-label="Stop response" title="Stop response"><Square size={13} fill="currentColor" /></button>
+          ) : (
+            <button type="submit" className="composer-send" disabled={(!input.trim() && attachments.length === 0) || isResetting || !sessionId || isRecording || isTranscribing} aria-label="Send message" title="Send message"><ArrowUp size={17} /></button>
+          )}
+          </div>
         </form>
       </div>
 

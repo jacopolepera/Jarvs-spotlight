@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import threading
+from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -46,6 +47,7 @@ from core.daemon.runtime import DaemonRuntime  # noqa: E402
 from core.daemon.security import DaemonSecurity, WS_PROTOCOL  # noqa: E402
 from core.daemon.session_service import (  # noqa: E402
     SessionBusyError,
+    StaleGenerationError,
     StaleSessionError,
 )
 from core.tools.settings_manager import SettingsManager  # noqa: E402
@@ -71,6 +73,10 @@ class ModelSaveUpdate(BaseModel):
     model_string: str | None = Field(default=None, max_length=500)
     execution_policy: ExecutionPolicy | None = None
     cloud_workspace_egress: CloudWorkspaceEgress | None = None
+    hermes_enabled: bool | None = None
+    hermes_runtime_path: str | None = Field(default=None, max_length=32_768)
+    hermes_home_path: str | None = Field(default=None, max_length=32_768)
+    hermes_allow_effectful_fixture: bool | None = None
 
     @field_validator("api_key")
     @classmethod
@@ -135,6 +141,51 @@ class VoiceTranscriptionPayload(BaseModel):
     mime_type: str = Field(min_length=1, max_length=100)
 
 
+class VoiceSettingsUpdate(BaseModel):
+    provider: Literal["local", "gemini"] | None = None
+    base_url: str | None = Field(default=None, min_length=1, max_length=2048)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    language: str | None = Field(default=None, max_length=35)
+
+
+class CancelGenerationPayload(BaseModel):
+    session_id: str = Field(min_length=1, max_length=200)
+    generation_id: str = Field(min_length=1, max_length=200)
+
+
+class HermesSettingsUpdate(BaseModel):
+    hermes_enabled: bool | None = None
+    hermes_runtime_path: str | None = Field(default=None, max_length=32_768)
+    hermes_home_path: str | None = Field(default=None, max_length=32_768)
+    hermes_allow_effectful_fixture: bool | None = None
+
+
+def _hermes_update_changes(update) -> dict:
+    field_map = {
+        "hermes_enabled": "enabled",
+        "hermes_runtime_path": "runtime_path",
+        "hermes_home_path": "home_path",
+        "hermes_allow_effectful_fixture": "allow_effectful_fixture",
+    }
+    return {
+        target: getattr(update, source)
+        for source, target in field_map.items()
+        if source in update.model_fields_set and getattr(update, source) is not None
+    }
+
+
+def _save_hermes_update(settings_manager, runtime, update) -> dict:
+    changes = _hermes_update_changes(update)
+    if not changes:
+        return settings_manager.get_public_hermes_settings()
+    try:
+        result = settings_manager.set_hermes_settings(**changes)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    runtime.reconfigure_hermes()
+    return result
+
+
 def _public_model(settings_manager: SettingsManager, model: dict) -> dict:
     return settings_manager.redact_model(model)
 
@@ -168,9 +219,21 @@ def create_app(
     security = security or DaemonSecurity.from_environment()
     settings_manager = runtime.settings_manager
 
-    app = FastAPI(title="Jarvs daemon", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(_app):
+        from core.daemon.run_recovery_api import exclusive_run_store_owner
+        with exclusive_run_store_owner(runtime.run_store):
+            try:
+                runtime.run_store.recover_interrupted_runs()
+                yield
+            finally:
+                runtime.close()
+
+    app = FastAPI(title="Jarvs daemon", version="0.1.0", lifespan=lifespan)
     app.state.runtime = runtime
     app.state.security = security
+    from core.daemon.run_recovery_api import create_run_recovery_router
+    app.include_router(create_run_recovery_router(runtime.run_store))
 
     app.add_middleware(
         CORSMiddleware,
@@ -205,16 +268,36 @@ def create_app(
             "engine_ready": runtime.engine_ready,
         }
 
+    @app.post("/lifecycle/prepare-shutdown")
+    def prepare_shutdown():
+        """Close owned optional runtimes before the desktop ends the process tree."""
+
+        runtime.close()
+        return {"status": "ready"}
+
     @app.get("/settings")
     def get_settings():
         return {
             "models": settings_manager.get_public_models_list(),
             "active_model": settings_manager.get_active_model_id(),
             "active_model_config": settings_manager.get_public_active_model(),
+            "voice": settings_manager.get_voice_config(),
             "theme": settings_manager.get_theme(),
             "workspace_path": settings_manager.get_workspace_path(),
             "execution_policy": settings_manager.get_execution_policy(),
             "cloud_workspace_egress": settings_manager.get_cloud_workspace_egress(),
+            **settings_manager.get_public_hermes_settings(),
+        }
+
+    @app.get("/specialists/hermes/status")
+    def get_hermes_status():
+        return runtime.get_hermes_status()
+
+    @app.post("/settings/hermes")
+    def save_hermes_settings(update: HermesSettingsUpdate):
+        return {
+            "status": "ok",
+            **_save_hermes_update(settings_manager, runtime, update),
         }
 
     @app.post("/settings/model")
@@ -230,6 +313,9 @@ def create_app(
                 settings_manager.get_active_model(),
             )
         )
+        # A specialist authorization is bound to the active local model. Stop
+        # an in-flight/loaded sidecar before a different model can be reused.
+        runtime.reconfigure_hermes()
         active = settings_manager.get_active_model()
         return {"status": "ok", "model": _public_model(settings_manager, active)}
 
@@ -245,6 +331,16 @@ def create_app(
         )
         if target_model is None:
             raise HTTPException(status_code=404, detail="Model not found.")
+
+        # Validate the optional specialist fields before any of the unified
+        # save endpoint's independent settings writers mutate disk.  A 422
+        # must not report failure after partially committing policy/theme.
+        try:
+            settings_manager.validate_hermes_settings(
+                **_hermes_update_changes(update)
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         if update.theme is not None or update.workspace_path is not None:
             settings_manager.save_settings(
@@ -262,6 +358,11 @@ def create_app(
             settings_manager.set_cloud_workspace_egress(
                 update.cloud_workspace_egress.value
             )
+        hermes_settings = _save_hermes_update(
+            settings_manager,
+            runtime,
+            update,
+        )
 
         if update.model_string:
             settings_manager.update_model(
@@ -291,10 +392,15 @@ def create_app(
                     settings_manager.get_active_model(),
                 )
             )
+        # This also invalidates workspace/model changes made without explicit
+        # Hermes fields. A subsequent specialist run will create a fresh,
+        # pinned adapter after a new policy decision.
+        runtime.reconfigure_hermes()
         return {
             "status": "ok",
             "execution_policy": settings_manager.get_execution_policy(),
             "cloud_workspace_egress": settings_manager.get_cloud_workspace_egress(),
+            **hermes_settings,
         }
 
     @app.post("/settings/models/add")
@@ -330,6 +436,7 @@ def create_app(
                     settings_manager.get_active_model(),
                 )
             )
+        runtime.reconfigure_hermes()
         return {
             "status": "ok",
             "active_model": settings_manager.get_active_model_id(),
@@ -463,13 +570,21 @@ def create_app(
             "effects": [effect.as_dict() for effect in effects],
         }
 
+    @app.post("/settings/voice")
+    def save_voice_settings(payload: VoiceSettingsUpdate):
+        try:
+            voice = settings_manager.set_voice_config(payload.model_dump(exclude_none=True))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"status": "ok", "voice": voice}
+
     @app.post("/voice/transcribe")
     def transcribe_voice(payload: VoiceTranscriptionPayload):
         # Voice dependencies and their HTTP client stay out of startup and the
         # ordinary chat path.
         from core.audio.transcriber import (
             VoiceTranscriptionError,
-            transcribe_audio_gemini_data,
+            transcribe_audio_data,
         )
 
         try:
@@ -480,15 +595,18 @@ def create_app(
                 detail={"code": "invalid_audio", "message": "The audio recording is invalid."},
             ) from exc
         try:
-            text = transcribe_audio_gemini_data(
+            text = transcribe_audio_data(
                 audio,
                 payload.mime_type,
-                settings_manager.get_voice_api_key(),
+                settings_manager.get_voice_config(),
+                api_key=settings_manager.get_voice_api_key(),
             )
         except VoiceTranscriptionError as exc:
-            status_code = 409 if exc.code == "voice_api_key_missing" else 422
+            status_code = 409 if exc.code in {"voice_api_key_missing", "voice_configuration_invalid"} else 422
             if exc.code in {"voice_provider_unavailable", "voice_provider_error"}:
                 status_code = 502
+            if exc.code == "voice_provider_timeout":
+                status_code = 504
             raise HTTPException(
                 status_code=status_code,
                 detail={"code": exc.code, "message": str(exc)},
@@ -509,6 +627,16 @@ def create_app(
         except ApprovalConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"status": "ok", "decision": status.value}
+
+    @app.post("/session/cancel")
+    def cancel_generation(payload: CancelGenerationPayload):
+        try:
+            cancelled = runtime.cancel_generation(payload.session_id, payload.generation_id)
+        except (StaleSessionError, StaleGenerationError) as exc:
+            raise HTTPException(
+                status_code=409, detail={"code": exc.code, "message": str(exc)}
+            ) from exc
+        return {"status": "ok", "cancelled": cancelled, **payload.model_dump()}
 
     @app.post("/session/reset")
     def reset_session():
@@ -687,10 +815,17 @@ def create_app(
                                 terminal = {
                                     "type": "error",
                                     "code": "execution_denied",
+                                    "reason_code": reason,
                                     "text": f"Execution was not run ({reason}).",
                                     "session_id": generation.session_id,
                                     "generation_id": generation.generation_id,
                                 }
+                                fallback = _direct_fallback_metadata(
+                                    "execution_denied",
+                                    reason,
+                                )
+                                if fallback is not None:
+                                    terminal["fallback"] = fallback
                                 break
 
                             text_to_send = _chunk_text(chunk)
@@ -717,7 +852,7 @@ def create_app(
                                 terminal = {
                                     "type": "error",
                                     "code": "generation_cancelled",
-                                    "text": "Generation cancelled because the session was reset.",
+                                    "text": "Generation stopped.",
                                     "session_id": generation.session_id,
                                     "generation_id": generation.generation_id,
                                 }
@@ -733,7 +868,7 @@ def create_app(
                             terminal = {
                                 "type": "error",
                                 "code": "generation_cancelled",
-                                "text": "Generation cancelled because the session was reset.",
+                                "text": "Generation stopped.",
                                 "session_id": generation.session_id,
                                 "generation_id": generation.generation_id,
                             }
@@ -746,6 +881,9 @@ def create_app(
                                 "session_id": generation.session_id,
                                 "generation_id": generation.generation_id,
                             }
+                            fallback = _direct_fallback_metadata(error_code)
+                            if fallback is not None:
+                                terminal["fallback"] = fallback
                     asyncio.run_coroutine_threadsafe(queue.put(terminal), loop)
 
                 threading.Thread(target=run_chat, daemon=True).start()
@@ -894,8 +1032,36 @@ def _public_generation_error(code: str) -> str:
         "provider_request_failed": "The model provider is unreachable or did not respond.",
         "provider_protocol_error": "The provider returned an invalid response.",
         "coordinator_error": "The tool execution flow did not complete.",
+        "specialist_unavailable": (
+            "The Hermes specialist is disabled, unavailable, or not configured."
+        ),
+        "specialist_execution_failed": (
+            "The Hermes specialist stopped before completing the request. "
+            "Review the activity trace before retrying."
+        ),
     }
     return messages.get(code, "Generation did not complete. Review the activity trace.")
+
+
+def _direct_fallback_metadata(
+    error_code: str,
+    reason_code: str | None = None,
+) -> dict[str, object] | None:
+    """Advertise Direct retry only when the specialist backend never started."""
+
+    specialist_preflight_denial = (
+        error_code == "execution_denied"
+        and isinstance(reason_code, str)
+        and reason_code.startswith("hermes_")
+        and reason_code != "hermes_preflight_cancelled"
+    )
+    if error_code != "specialist_unavailable" and not specialist_preflight_denial:
+        return None
+    return {
+        "mode": "direct",
+        "automatic": False,
+        "safe_before_execution": True,
+    }
 
 
 def _chunk_text(chunk):

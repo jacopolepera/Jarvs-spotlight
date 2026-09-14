@@ -2,7 +2,7 @@ export const THEME_OPTIONS = [
   {
     name: "Default",
     label: "Jarvs Spotlight",
-    description: "A focused cyan interface designed for fast desktop access.",
+    description: "Quiet charcoal surfaces and a clean, focused conversation.",
     attribute: "default",
   },
   {

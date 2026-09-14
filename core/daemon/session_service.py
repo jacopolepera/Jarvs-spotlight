@@ -49,6 +49,12 @@ class SessionBusyError(SessionError):
     code = "session_busy"
 
 
+class StaleGenerationError(SessionError):
+    """A stop request must never cancel a different generation."""
+
+    code = "stale_generation"
+
+
 @dataclass
 class Generation:
     """A generation lease issued by :class:`SessionService`."""
@@ -58,6 +64,7 @@ class Generation:
     routing_signal: RoutingSignal = field(default_factory=RoutingSignal)
     tool_invocation: ToolInvocation | None = None
     cancelled: threading.Event = field(default_factory=threading.Event)
+    preserve_context_on_cancel: bool = False
 
 
 def _message_text(message: dict[str, Any]) -> str:
@@ -182,6 +189,20 @@ class SessionService:
                 and not generation.cancelled.is_set()
             )
 
+    def cancel_generation(self, session_id: str, generation_id: str) -> bool:
+        """Signal only the selected generation, keeping the current conversation."""
+        with self._state_lock:
+            if session_id != self._session_id:
+                raise StaleSessionError(session_id, self._session_id)
+            active = self._active_generation
+            if active is None:
+                return False
+            if active.generation_id != generation_id:
+                raise StaleGenerationError("The requested generation is no longer active.")
+            active.preserve_context_on_cancel = True
+            active.cancelled.set()
+            return True
+
     def configure_engine(self, configure: Callable[[Any], None]) -> None:
         """Apply a runtime configuration only between engine generations."""
 
@@ -280,8 +301,9 @@ class SessionService:
             finally:
                 with self._state_lock:
                     invalidated = (
-                        invalidated
-                        or generation.cancelled.is_set()
+                        ((invalidated or generation.cancelled.is_set())
+                         and not generation.preserve_context_on_cancel)
+                        or self._reset_pending
                         or generation.session_id != self._session_id
                     )
 
@@ -344,7 +366,7 @@ class SessionService:
                 self._active_generation = None
                 finalize_reset = (
                     self._reset_pending
-                    or generation.cancelled.is_set()
+                    or (generation.cancelled.is_set() and not generation.preserve_context_on_cancel)
                     or generation.session_id != self._session_id
                 )
             if not finalize_reset:

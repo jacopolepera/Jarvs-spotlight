@@ -2,14 +2,15 @@ use serde::Serialize;
 use std::{
     fs,
     fs::OpenOptions,
-    io::Write,
-    net::TcpListener,
+    io::{Read, Write},
+    net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex, MutexGuard,
     },
+    time::{Duration, Instant},
 };
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -35,13 +36,37 @@ const EXPANDED_WINDOW_WIDTH: f64 = 600.0;
 const EXPANDED_WINDOW_HEIGHT: f64 = 500.0;
 const EXPANDED_MIN_WIDTH: f64 = 300.0;
 const EXPANDED_MIN_HEIGHT: f64 = 200.0;
+const DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+const DAEMON_FORCED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const DAEMON_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const DAEMON_PREPARE_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+const DAEMON_PREPARE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+const DAEMON_PREPARE_MAX_RESPONSE_BYTES: usize = 4096;
+
+struct ManagedDaemon {
+    child: Child,
+    containment: ProcessContainment,
+}
+
+#[cfg(windows)]
+struct ProcessContainment {
+    job: Option<std::os::windows::io::OwnedHandle>,
+}
+
+#[cfg(unix)]
+struct ProcessContainment {
+    process_group: i32,
+}
+
+#[cfg(not(any(unix, windows)))]
+struct ProcessContainment;
 
 struct DesktopState {
     exiting: AtomicBool,
     shortcut_registered: AtomicBool,
     voice_shortcut_registered: AtomicBool,
     daemon_starting: AtomicBool,
-    daemon: Mutex<Option<Child>>,
+    daemon: Mutex<Option<ManagedDaemon>>,
     daemon_transition: Mutex<()>,
     connection: DaemonConnection,
     attachment_root: Mutex<Option<PathBuf>>,
@@ -293,7 +318,7 @@ fn desktop_state<R: Runtime>(app: &AppHandle<R>) -> tauri::State<'_, DesktopStat
     app.state::<DesktopState>()
 }
 
-fn daemon_guard(state: &DesktopState) -> MutexGuard<'_, Option<Child>> {
+fn daemon_guard(state: &DesktopState) -> MutexGuard<'_, Option<ManagedDaemon>> {
     state
         .daemon
         .lock()
@@ -305,6 +330,130 @@ fn daemon_transition_guard(state: &DesktopState) -> MutexGuard<'_, ()> {
         .daemon_transition
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(windows)]
+impl ProcessContainment {
+    fn create_before_spawn() -> Result<Self, String> {
+        use std::{mem::size_of, os::windows::io::FromRawHandle, ptr};
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        let raw_job = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
+        if raw_job.is_null() {
+            return Err(format!(
+                "failed to create daemon Job Object: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let job = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(raw_job) };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                raw_job,
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            return Err(format!(
+                "failed to configure daemon Job Object: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(Self { job: Some(job) })
+    }
+
+    fn attach(&self, child: &Child) -> Result<(), String> {
+        use std::os::windows::io::{AsRawHandle, RawHandle};
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+
+        let Some(job) = self.job.as_ref() else {
+            return Err("daemon Job Object is already closed".to_string());
+        };
+        let assigned = unsafe {
+            AssignProcessToJobObject(
+                job.as_raw_handle() as RawHandle,
+                child.as_raw_handle() as RawHandle,
+            )
+        };
+        if assigned == 0 {
+            return Err(format!(
+                "failed to assign daemon to Job Object: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
+
+    fn request_graceful_shutdown(&self) -> Result<bool, String> {
+        // A GUI process created with CREATE_NO_WINDOW has no shared console to
+        // receive CTRL_BREAK. The authenticated prepare-shutdown request has
+        // already released daemon-owned sidecars, but it intentionally does
+        // not stop Uvicorn. Closing the Job Object is therefore the reliable
+        // Windows termination operation. The boolean tells the caller not to
+        // wait for a process signal that was never sent.
+        Ok(false)
+    }
+
+    fn force_terminate_tree(&mut self) -> Result<(), String> {
+        // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE terminates every process still in
+        // the job, including optional worker descendants that created a new
+        // console process group. No PID-based taskkill fallback is used.
+        drop(self.job.take());
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl ProcessContainment {
+    fn from_child(child: &Child) -> Result<Self, String> {
+        let process_group = i32::try_from(child.id())
+            .map_err(|_| "daemon PID is outside the supported Unix range".to_string())?;
+        Ok(Self { process_group })
+    }
+
+    fn request_graceful_shutdown(&self) -> Result<bool, String> {
+        self.signal(-self.process_group, libc::SIGTERM)?;
+        Ok(true)
+    }
+
+    fn force_terminate_tree(&mut self) -> Result<(), String> {
+        self.signal(-self.process_group, libc::SIGKILL)
+    }
+
+    fn signal(&self, target: i32, signal: i32) -> Result<(), String> {
+        if unsafe { libc::kill(target, signal) } == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(());
+        }
+        Err(format!(
+            "failed to signal daemon process group {}: {error}",
+            self.process_group
+        ))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+impl ProcessContainment {
+    fn from_child(_child: &Child) -> Result<Self, String> {
+        Ok(Self)
+    }
+
+    fn request_graceful_shutdown(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    fn force_terminate_tree(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 fn is_run_directory_name(name: &str) -> bool {
@@ -420,24 +569,140 @@ fn cleanup_attachment_root(path: Option<PathBuf>, run_id: &str) {
     }
 }
 
-fn take_daemon(state: &DesktopState) -> Option<Child> {
+fn take_daemon(state: &DesktopState) -> Option<ManagedDaemon> {
     daemon_guard(state).take()
 }
 
-fn stop_child(mut child: Child) {
-    let pid = child.id();
-    match child.try_wait() {
-        Ok(Some(_)) => return,
+fn request_daemon_shutdown(connection: &DaemonConnection) -> Result<(), String> {
+    let address = SocketAddr::from(([127, 0, 0, 1], connection.port));
+    let mut stream = TcpStream::connect_timeout(&address, DAEMON_PREPARE_CONNECT_TIMEOUT)
+        .map_err(|error| format!("failed to connect to daemon shutdown endpoint: {error}"))?;
+    stream
+        .set_read_timeout(Some(DAEMON_PREPARE_RESPONSE_TIMEOUT))
+        .map_err(|error| format!("failed to bound daemon shutdown response: {error}"))?;
+    stream
+        .set_write_timeout(Some(DAEMON_PREPARE_CONNECT_TIMEOUT))
+        .map_err(|error| format!("failed to bound daemon shutdown request: {error}"))?;
+    let request = format!(
+        "POST /lifecycle/prepare-shutdown HTTP/1.1\r\n\
+         Host: 127.0.0.1:{}\r\n\
+         Authorization: Bearer {}\r\n\
+         Connection: close\r\n\
+         Content-Length: 0\r\n\r\n",
+        connection.port, connection.token
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("failed to send daemon shutdown request: {error}"))?;
+    stream
+        .flush()
+        .map_err(|error| format!("failed to flush daemon shutdown request: {error}"))?;
+
+    let mut response = Vec::with_capacity(512);
+    let mut buffer = [0_u8; 512];
+    while response.len() < DAEMON_PREPARE_MAX_RESPONSE_BYTES {
+        let remaining = DAEMON_PREPARE_MAX_RESPONSE_BYTES - response.len();
+        let maximum_read = remaining.min(buffer.len());
+        let read = stream
+            .read(&mut buffer[..maximum_read])
+            .map_err(|error| format!("failed to read daemon shutdown response: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        response.extend_from_slice(&buffer[..read]);
+        if response.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let status_line_end = response
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .ok_or_else(|| "daemon shutdown response was incomplete".to_string())?;
+    let status_line = std::str::from_utf8(&response[..status_line_end])
+        .map_err(|_| "daemon shutdown response was not valid HTTP".to_string())?;
+    let status_code = status_line
+        .split_ascii_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| "daemon shutdown response had no status code".to_string())?;
+    if status_code != 200 {
+        return Err(format!(
+            "daemon shutdown endpoint returned HTTP {status_code}"
+        ));
+    }
+    Ok(())
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> Result<bool, std::io::Error> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(DAEMON_EXIT_POLL_INTERVAL);
+    }
+}
+
+fn stop_daemon(mut daemon: ManagedDaemon) {
+    let pid = daemon.child.id();
+    match daemon.child.try_wait() {
+        Ok(Some(_)) => {
+            if let Err(error) = daemon.containment.force_terminate_tree() {
+                eprintln!("[Jarvs/daemon] failed to close residual process tree {pid}: {error}");
+            }
+            return;
+        }
         Ok(None) => {}
         Err(error) => eprintln!("[Jarvs/daemon] failed to query process {pid}: {error}"),
     }
 
-    if let Err(error) = child.kill() {
-        eprintln!("[Jarvs/daemon] failed to stop process {pid}: {error}");
-        return;
+    let graceful_requested = match daemon.containment.request_graceful_shutdown() {
+        Ok(requested) => requested,
+        Err(error) => {
+            eprintln!("[Jarvs/daemon] graceful shutdown signal failed for {pid}: {error}");
+            false
+        }
+    };
+    if graceful_requested {
+        match wait_for_child_exit(&mut daemon.child, DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT) {
+            Ok(true) => {
+                if let Err(error) = daemon.containment.force_terminate_tree() {
+                    eprintln!(
+                        "[Jarvs/daemon] failed to close residual process tree {pid}: {error}"
+                    );
+                }
+                return;
+            }
+            Ok(false) => {
+                eprintln!("[Jarvs/daemon] process {pid} exceeded the graceful shutdown timeout")
+            }
+            Err(error) => {
+                eprintln!("[Jarvs/daemon] failed while waiting for process {pid}: {error}")
+            }
+        }
     }
-    if let Err(error) = child.wait() {
-        eprintln!("[Jarvs/daemon] failed to reap process {pid}: {error}");
+
+    if let Err(error) = daemon.containment.force_terminate_tree() {
+        eprintln!("[Jarvs/daemon] failed to terminate process tree {pid}: {error}");
+    }
+    match wait_for_child_exit(&mut daemon.child, DAEMON_FORCED_SHUTDOWN_TIMEOUT) {
+        Ok(true) => return,
+        Ok(false) => {
+            eprintln!("[Jarvs/daemon] process {pid} survived its containment shutdown");
+        }
+        Err(error) => eprintln!("[Jarvs/daemon] failed while reaping process {pid}: {error}"),
+    }
+
+    // This final root-only fallback is for an unexpected platform/API failure;
+    // containment above remains responsible for descendants.
+    if let Err(error) = daemon.child.kill() {
+        eprintln!("[Jarvs/daemon] failed to stop root process {pid}: {error}");
+    }
+    if let Err(error) = daemon.child.wait() {
+        eprintln!("[Jarvs/daemon] failed to reap root process {pid}: {error}");
     }
 }
 
@@ -453,8 +718,11 @@ fn begin_quit<R: Runtime>(app: AppHandle<R>) {
         let daemon = take_daemon(&state);
         let attachment_root = take_attachment_root(&state);
         let run_id = state.connection.run_id.clone();
-        if let Some(child) = daemon {
-            stop_child(child);
+        if let Some(daemon) = daemon {
+            if let Err(error) = request_daemon_shutdown(&state.connection) {
+                eprintln!("[Jarvs/daemon] {error}");
+            }
+            stop_daemon(daemon);
         }
         cleanup_attachment_root(attachment_root, &run_id);
         state.daemon_starting.store(false, Ordering::SeqCst);
@@ -606,7 +874,7 @@ fn daemon_runtime_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String
     Ok(runtime)
 }
 
-fn spawn_daemon<R: Runtime>(app: &AppHandle<R>) -> Result<Child, String> {
+fn spawn_daemon<R: Runtime>(app: &AppHandle<R>) -> Result<ManagedDaemon, String> {
     let runtime_root = daemon_runtime_root(app)?;
     let attachment_root = ensure_attachment_root(app)?;
     let state = desktop_state(app);
@@ -664,9 +932,35 @@ fn spawn_daemon<R: Runtime>(app: &AppHandle<R>) -> Result<Child, String> {
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    command
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+
+    #[cfg(windows)]
+    let containment = ProcessContainment::create_before_spawn()?;
+
+    let mut child = command
         .spawn()
-        .map_err(|error| format!("failed to start Python daemon: {error}"))
+        .map_err(|error| format!("failed to start Python daemon: {error}"))?;
+
+    #[cfg(windows)]
+    if let Err(error) = containment.attach(&child) {
+        // The daemon is never published to DesktopState before assignment, so
+        // the renderer cannot submit a request during this fail-closed path.
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+
+    #[cfg(unix)]
+    let containment = ProcessContainment::from_child(&child)?;
+
+    #[cfg(not(any(unix, windows)))]
+    let containment = ProcessContainment::from_child(&child)?;
+
+    Ok(ManagedDaemon { child, containment })
 }
 
 fn register_shortcuts<R: Runtime>(app: &AppHandle<R>) {
@@ -778,22 +1072,30 @@ fn new_session(app: AppHandle, hide_after: Option<bool>) -> Result<(), String> {
 #[tauri::command]
 fn daemon_status(app: AppHandle) -> DaemonStatus {
     let state = desktop_state(&app);
-    let mut daemon = daemon_guard(&state);
+    let mut daemon_slot = daemon_guard(&state);
     let mut running = false;
     let mut pid = None;
+    let mut exited = false;
 
-    if let Some(child) = daemon.as_mut() {
-        match child.try_wait() {
+    if let Some(daemon) = daemon_slot.as_mut() {
+        match daemon.child.try_wait() {
             Ok(None) => {
                 running = true;
-                pid = Some(child.id());
+                pid = Some(daemon.child.id());
             }
             Ok(Some(_)) => {
-                *daemon = None;
+                exited = true;
             }
             Err(error) => {
                 report_native_error(&app, "daemon", error);
-                pid = Some(child.id());
+                pid = Some(daemon.child.id());
+            }
+        }
+    }
+    if exited {
+        if let Some(mut daemon) = daemon_slot.take() {
+            if let Err(error) = daemon.containment.force_terminate_tree() {
+                report_native_error(&app, "daemon", error);
             }
         }
     }
@@ -1006,11 +1308,11 @@ pub fn run() {
                     return;
                 }
                 match spawn_daemon(&app_handle) {
-                    Ok(child) => {
+                    Ok(daemon) => {
                         if state.exiting.load(Ordering::SeqCst) {
-                            stop_child(child);
+                            stop_daemon(daemon);
                         } else {
-                            *daemon_guard(&state) = Some(child);
+                            *daemon_guard(&state) = Some(daemon);
                         }
                     }
                     Err(error) => report_native_error(&app_handle, "daemon", error),
@@ -1034,8 +1336,11 @@ pub fn run() {
         if let tauri::RunEvent::Exit = event {
             let state = desktop_state(app);
             let _transition = daemon_transition_guard(&state);
-            if let Some(child) = take_daemon(&state) {
-                stop_child(child);
+            if let Some(daemon) = take_daemon(&state) {
+                if let Err(error) = request_daemon_shutdown(&state.connection) {
+                    eprintln!("[Jarvs/daemon] {error}");
+                }
+                stop_daemon(daemon);
             }
             let attachment_root = take_attachment_root(&state);
             cleanup_attachment_root(attachment_root, &state.connection.run_id);
@@ -1046,8 +1351,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        attachment_kind, daemon_transition_guard, is_run_directory_name, toggle_action,
-        window_dimensions, DaemonConnection, DesktopState, ToggleAction,
+        attachment_kind, daemon_transition_guard, is_run_directory_name, request_daemon_shutdown,
+        toggle_action, window_dimensions, DaemonConnection, DesktopState, ToggleAction,
     };
     use std::path::Path;
     use std::sync::{mpsc, Arc};
@@ -1142,5 +1447,128 @@ mod tests {
             .expect("quit acquired transition");
         startup.join().expect("startup join");
         quit.join().expect("quit join");
+    }
+
+    #[test]
+    fn shutdown_request_is_loopback_authenticated() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind shutdown fixture");
+        let port = listener
+            .local_addr()
+            .expect("shutdown fixture address")
+            .port();
+        let connection = DaemonConnection {
+            http_url: format!("http://127.0.0.1:{port}"),
+            ws_url: format!("ws://127.0.0.1:{port}/chat"),
+            token: "fixture-token".to_string(),
+            port,
+            run_id: uuid::Uuid::new_v4().simple().to_string(),
+        };
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept shutdown request");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("bound fixture read");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 256];
+            while request.len() < 4096 {
+                let read = socket.read(&mut buffer).expect("read shutdown request");
+                assert!(read > 0, "shutdown request ended before its headers");
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).expect("shutdown request UTF-8");
+            assert!(request.starts_with("POST /lifecycle/prepare-shutdown HTTP/1.1\r\n"));
+            assert!(request.contains("\r\nAuthorization: Bearer fixture-token\r\n"));
+            assert!(request.contains("\r\nContent-Length: 0\r\n"));
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 18\r\nConnection: close\r\n\r\n{\"status\":\"ready\"}",
+                )
+                .expect("write shutdown response");
+        });
+
+        request_daemon_shutdown(&connection).expect("authenticated shutdown request");
+        server.join().expect("shutdown fixture join");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_close_terminates_daemon_descendants() {
+        use super::{wait_for_child_exit, ProcessContainment};
+        use std::os::windows::{
+            io::{AsRawHandle, FromRawHandle, OwnedHandle},
+            process::CommandExt,
+        };
+        use std::process::{Command, Stdio};
+        use std::time::Instant;
+        use windows_sys::Win32::{
+            Foundation::WAIT_OBJECT_0,
+            System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+        };
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let test_root =
+            std::env::temp_dir().join(format!("jarvs-job-test-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir(&test_root).expect("create job test directory");
+        let pid_file = test_root.join("descendant.pid");
+        let escaped_pid_file = pid_file.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "$child = Start-Process -FilePath $env:ComSpec \
+             -ArgumentList @('/D','/C','ping -n 30 127.0.0.1 >nul') \
+             -WindowStyle Hidden -PassThru; \
+             [IO.File]::WriteAllText('{escaped_pid_file}', [string]$child.Id); \
+             Wait-Process -Id $child.Id"
+        );
+
+        let mut containment =
+            ProcessContainment::create_before_spawn().expect("create kill-on-close job");
+        let mut root = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .expect("spawn daemon fixture");
+        containment.attach(&root).expect("assign daemon fixture");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !pid_file.is_file() && Instant::now() < deadline {
+            assert!(
+                root.try_wait().expect("query daemon fixture").is_none(),
+                "daemon fixture exited before creating its descendant"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let descendant_pid: u32 = std::fs::read_to_string(&pid_file)
+            .expect("read descendant PID")
+            .trim()
+            .parse()
+            .expect("parse descendant PID");
+        let descendant_handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, descendant_pid) };
+        assert!(
+            !descendant_handle.is_null(),
+            "descendant must be alive before Job Object close"
+        );
+        let descendant_handle = unsafe { OwnedHandle::from_raw_handle(descendant_handle) };
+
+        containment
+            .force_terminate_tree()
+            .expect("close kill-on-close job");
+        assert_eq!(
+            unsafe { WaitForSingleObject(descendant_handle.as_raw_handle(), 3_000) },
+            WAIT_OBJECT_0,
+            "closing the Job Object must terminate the descendant"
+        );
+        assert!(
+            wait_for_child_exit(&mut root, Duration::from_secs(3)).expect("reap daemon fixture"),
+            "closing the Job Object must terminate the root"
+        );
+        let _ = std::fs::remove_dir_all(test_root);
     }
 }

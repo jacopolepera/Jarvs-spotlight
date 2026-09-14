@@ -42,6 +42,44 @@ def test_health_is_live_before_agent_runtime_initializes(tmp_path):
     assert response.json() == {"status": "ok", "engine_ready": False}
 
 
+def test_prepare_shutdown_requires_authentication_and_closes_runtime(tmp_path):
+    (tmp_path / "models.json").write_text(
+        json.dumps({"models": [], "active_model": ""}),
+        encoding="utf-8",
+    )
+    manager = SettingsManager(root_dir=tmp_path)
+    runtime = DaemonRuntime(manager)
+    close_calls = []
+    original_close = runtime.close
+
+    def close():
+        close_calls.append(True)
+        original_close()
+
+    runtime.close = close
+    app = create_app(runtime, DaemonSecurity.create("token"))
+
+    with TestClient(app) as client:
+        assert client.post("/lifecycle/prepare-shutdown").status_code == 401
+        assert client.post(
+            "/lifecycle/prepare-shutdown",
+            headers={"Authorization": "Bearer wrong"},
+        ).status_code == 401
+        assert close_calls == []
+
+        response = client.post(
+            "/lifecycle/prepare-shutdown",
+            headers={"Authorization": "Bearer token"},
+        )
+        assert response.status_code == 200
+        assert response.json() == {"status": "ready"}
+        assert close_calls == [True]
+
+    # The FastAPI lifespan closes the same runtime again after the authenticated
+    # pre-shutdown handshake. Runtime cleanup must therefore remain idempotent.
+    assert close_calls == [True, True]
+
+
 def test_websocket_handshake_does_not_initialize_agent_runtime(tmp_path):
     (tmp_path / "models.json").write_text(
         json.dumps({"models": [], "active_model": ""}),

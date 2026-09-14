@@ -2,21 +2,31 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'codex/testing-*']
   pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  validate:
+  python:
+    name: Python ${{ matrix.python-version }}
     runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install Python dependencies
@@ -24,6 +34,13 @@ jobs:
 
       - name: Test Python runtime
         run: python -m pytest
+
+  frontend:
+    name: Frontend
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
@@ -38,6 +55,13 @@ jobs:
       - name: Build frontend
         working-directory: desktop
         run: npm run build
+
+  tauri:
+    name: Tauri host
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
