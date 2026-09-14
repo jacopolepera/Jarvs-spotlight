@@ -38,6 +38,18 @@ def test_edit_refuses_stale_content_without_overwriting(tmp_path):
     assert path.read_bytes() == b"newer user edit"
 
 
+@pytest.mark.parametrize("raw", [b"first\r\nsecond\r\nthird\r\n", b"first\nsecond\r\nthird\n"])
+def test_multiline_read_can_be_used_as_exact_edit_snippet(tmp_path, raw):
+    path = tmp_path / "notes.txt"
+    path.write_bytes(raw)
+    read = execute(tmp_path, "workspace.read_text", {"path": "notes.txt", "max_lines": 2})
+    snippet = read.output["text"]
+    assert snippet.encode() in raw
+    result = edit(tmp_path, raw, [{"old_text": snippet, "new_text": "replacement"}])
+    assert result.status is ToolStatus.COMPLETED
+    assert path.read_bytes() == raw.replace(snippet.encode(), b"replacement", 1)
+
+
 def test_edit_batch_is_all_or_nothing_on_ambiguous_second_edit(tmp_path):
     raw = b"one two two"
     path = tmp_path / "notes.txt"

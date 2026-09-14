@@ -457,17 +457,24 @@ def _read_text(arguments: Mapping[str, Any], context: ToolContext) -> dict[str, 
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("workspace file is not UTF-8 text") from exc
-    lines = text.splitlines()
+    # Preserve line separators between selected lines: edit_text consumes exact
+    # snippets from this result, including Windows CRLF files.
+    lines = text.splitlines(keepends=True)
     start_line = arguments.get("start_line", 1)
     max_lines = arguments.get("max_lines", 200)
     selected = lines[start_line - 1 : start_line - 1 + max_lines]
+    excerpt = "".join(selected)
+    if excerpt.endswith("\r\n"):
+        excerpt = excerpt[:-2]
+    elif excerpt.endswith(("\r", "\n")):
+        excerpt = excerpt[:-1]
     return {
         "path": _relative(root, path),
         "start_line": start_line,
         "line_count": len(selected),
         "total_lines": len(lines),
         "truncated": start_line - 1 + len(selected) < len(lines),
-        "text": "\n".join(selected),
+        "text": excerpt,
         "sha256": hashlib.sha256(raw).hexdigest(),
     }
 
