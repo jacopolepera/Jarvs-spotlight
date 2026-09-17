@@ -1,6 +1,26 @@
 # Piano di sviluppo Jarvs per area
 
-Aggiornato: 14 settembre 2026. Stato: **pianificazione, non esecuzione automatica**.
+Aggiornato: 17 settembre 2026. Stato: **piano con avanzamento del lotto autorizzato**.
+
+## Lotto autorizzato dopo il piano
+
+L'utente ha autorizzato i prossimi passi e il push, con massimo due sottoagenti.
+Il lotto corrente comprende AUD-1 e la parte verificabile di REL-1/UI-1, con
+correzioni circoscritte dei difetti trovati. Gli altri task restano nel backlog.
+La prova manuale su WebView2, microfono e scorciatoie reali resta distinta dai
+controlli browser automatizzati: questi ultimi non bastano a chiudere REL-1.
+
+Avanzamento del lotto:
+
+- AUD-1: pannello Recovery nelle impostazioni, caricato solo all'apertura;
+  ispezione e conferma umana senza riesecuzione. Provato anche su daemon reale
+  con database temporaneo, distinto dai dati personali.
+- FILE-1.1: corretto il caso multilinea Windows: gli estratti letti conservano
+  CRLF e separatori misti per poterli usare come sostituzioni esatte.
+- UI-1: verifica browser dei flussi di tastiera, arresto e dimensioni compatte;
+  corretti focus iniziale, contenimento focus nelle approvazioni e indicazione Stop.
+  REL-1 resta parziale fino alla prova nativa di WebView2, microfono e scorciatoie.
+- VOICE-1, REL-2 e gli altri task non sono stati avviati in questo lotto.
 
 ## Obiettivo e modo di lavorare
 
@@ -28,7 +48,7 @@ conservate. Implementati: refresh UI, Stop senza reset, editing mirato con contr
 versione, recovery conservativo e client speech locale/Gemini. Vedere
 [guida di testing](testing-refresh.md) per comportamento, prove e limiti.
 
-Non ancora consegnati: UI del recovery, server speech locale installato, MCP nativo,
+Non ancora consegnati: server speech locale installato, MCP nativo,
 plugin installabili, browser gestito, gestione dei modelli e distribuzione autonoma.
 Lo spike Hermes non è un prerequisito per queste capacità.
 

@@ -1,7 +1,7 @@
 # Branch di testing: refresh Jarvs
 
 Branch: `codex/testing-refresh-2026-09-11`. Nessun merge su `main`.
-Documento aggiornato il 14 settembre 2026.
+Documento aggiornato il 17 settembre 2026.
 
 ## Cosa contiene
 
@@ -50,13 +50,17 @@ release non è stato ricompilato: potrebbe aprire la versione precedente.
 
 Le API `/run-recovery` e `/run-recovery/{run_id}/{invocation_id}/acknowledge`
 sono protette dalla stessa autenticazione del daemon. La conferma è una verifica
-umana, non una nuova esecuzione. La UI dedicata al recupero è pianificata in AUD-1.
+umana, non una nuova esecuzione. Il pannello è in Settings → Recovery: carica le
+operazioni quando viene aperto, offre Inspect run e registra la scelta solo dopo
+conferma positiva del daemon. Refresh rilegge le operazioni ancora da verificare;
+nessun controllo periodico viene avviato durante la chat. Un conflitto ricarica
+la lista e richiede di verificarne lo stato aggiornato.
 Non simulare crash durante operazioni su dati importanti; i test automatici usano
 processi e file temporanei isolati.
 
 ## Verifiche e limiti
 
-La suite Python integrata è stata eseguita con successo (317 test, uno escluso
+La suite Python integrata è stata eseguita con successo (319 test, uno escluso
 per configurazione); il build frontend TypeScript/Vite e i 10 test Rust sono
 riusciti. Il controllo visivo su Edge con dati simulati ha verificato home e
 impostazioni, senza errori JavaScript o overflow orizzontale. I test
@@ -66,3 +70,23 @@ L'esito finale delle verifiche e del push è riportato nel messaggio di consegna
 La validazione manuale di WebView2, microfono, scorciatoie globali e modello locale
 reale resta necessaria sulla macchina d'uso. Il ramo include codice sperimentale
 precedente: la selezione dei commit per main è un task distinto, REL-2 nel piano.
+
+## Verifica del pannello Recovery
+
+È stata eseguita una prova browser con daemon autentico e database temporaneo:
+nessuna richiesta recovery prima dell'apertura del pannello, run interrotto visibile,
+dettagli consultabili, una sola conferma persistita, lista aggiornata e nessuna nuova
+esecuzione dello strumento. Il run resta failed anche dopo la verifica umana.
+Non sono stati usati dati personali o richieste a modelli durante questa prova.
+
+La QA browser automatizzata è ripetibile con `node scripts/ui-release-qa.cjs`
+e `node scripts/recovery-ui-qa.cjs`, dopo `npm --prefix desktop run build`.
+Richiede Playwright disponibile all'ambiente Node ed Edge installato. Se Playwright
+si trova altrove, impostare `JARVS_PLAYWRIGHT_PATH` alla directory del pacchetto;
+`JARVS_BROWSER_CHANNEL` permette di scegliere un altro canale compatibile installato.
+Gli script servono il build su una porta locale temporanea e usano dati simulati.
+
+Le correzioni UI coprono il focus iniziale sul composer, il focus trattenuto nella
+conferma di esecuzione (inizialmente su Deny) e l'indicazione Response stopped
+sulla risposta dell'assistente. La QA controlla anche bozza multilinea, scroll
+durante lo streaming e dimensioni compatte; non sostituisce la prova nativa.

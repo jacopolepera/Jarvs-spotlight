@@ -1,0 +1,23 @@
+.recovery-panel { font-size: 12px; line-height: 1.6; min-width: 0; }
+.recovery-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.recovery-heading h3, .recovery-item h4 { margin: 0; font-size: 14px; font-weight: 600; }
+.recovery-muted { color: var(--color-jarvs-text-muted); margin: 6px 0 12px; }
+.recovery-list { list-style: none; padding: 0; margin: 16px 0 0; }
+.recovery-item { padding: 18px 0; border-top: 1px solid var(--color-jarvs-border); overflow-wrap: anywhere; }
+.recovery-item h4 { font-size: 13px; user-select: text; }
+.recovery-uncertain, .recovery-confirmed { margin: 8px 0; }
+.recovery-text-button { color: var(--color-jarvs-text-muted); background: transparent; border: 0; padding: 4px 0; text-decoration: underline; text-underline-offset: 3px; }
+.recovery-text-button:hover { color: var(--color-jarvs-text); }
+.recovery-panel button:disabled { opacity: .5; cursor: default; }
+.recovery-details { border-left: 1px solid var(--color-jarvs-border-strong); padding: 2px 0 2px 12px; margin: 8px 0 12px; user-select: text; }
+.recovery-details dl { display: grid; grid-template-columns: minmax(80px, 1fr) minmax(0, 2fr); gap: 5px 12px; margin: 6px 0 12px; }
+.recovery-details dt { color: var(--color-jarvs-text-muted); }
+.recovery-details dd { margin: 0; overflow-wrap: anywhere; }
+.recovery-actions { margin-top: 12px; }
+.recovery-action-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.recovery-action-row select { min-width: 0; flex: 1 1 200px; width: 100%; border: 1px solid var(--color-jarvs-border-strong); border-radius: 7px; background: var(--jarvs-control-background); color: var(--color-jarvs-text); padding: 8px; font: inherit; }
+.recovery-action-row option { background: var(--color-jarvs-surface); color: var(--color-jarvs-text); }
+.recovery-confirm-button { padding: 8px 12px; border: 0; border-radius: 7px; background: var(--color-jarvs-accent); color: var(--jarvs-accent-contrast); font: inherit; }
+.recovery-error, .recovery-notice { border-left: 2px solid var(--color-jarvs-border-strong); padding-left: 10px; margin: 10px 0; }
+.recovery-empty { color: var(--color-jarvs-text-muted); margin-top: 22px; }
+.recovery-panel :is(button, select):focus-visible { outline: 2px solid var(--color-jarvs-accent); outline-offset: 3px; }

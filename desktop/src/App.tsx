@@ -6,6 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import "./App.css";
+import RecoveryPanel from "./RecoveryPanel";
 import { createDaemonWebSocket, daemonFetch } from "./daemonClient";
 import { THEME_OPTIONS, getThemeAttribute, normalizeThemeName, type ThemeName } from "./themes";
 
@@ -284,6 +285,7 @@ function App() {
   const showSettingsRef = useRef(false);
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const settingsPanelRef = useRef<HTMLDivElement>(null);
+  const approvalPanelRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const chatHistoryRef = useRef<HTMLDivElement>(null);
   const followMessagesRef = useRef(true);
@@ -304,7 +306,7 @@ function App() {
 
   // Settings state
   const [showSettings, setShowSettings] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<"general" | "models" | "personal" | "advanced">("general");
+  const [settingsTab, setSettingsTab] = useState<"general" | "models" | "personal" | "recovery" | "advanced">("general");
   const [voiceConfig, setVoiceConfig] = useState({ provider: "local", base_url: "http://127.0.0.1:8000/v1", model: "Systran/faster-whisper-small", language: "" });
   const [voiceDirty, setVoiceDirty] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -604,6 +606,45 @@ function App() {
       setIsResetting(false);
     }
   }, [clearConversationUi]);
+
+  // autoFocus cannot focus the initially disabled composer before the session arrives.
+  useEffect(() => {
+    if (sessionId && !isResetting && !showSettingsRef.current && !approvalPanelRef.current) {
+      inputRef.current?.focus();
+    }
+  }, [sessionId, isResetting]);
+
+  useEffect(() => {
+    if (!pendingApproval) return;
+    const panel = approvalPanelRef.current;
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const getButtons = () => Array.from(panel?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
+    const timer = window.setTimeout(() => getButtons()[0]?.focus(), 0);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const buttons = getButtons();
+      const first = buttons[0];
+      const last = buttons[buttons.length - 1];
+      if (!first || !last) {
+        event.preventDefault();
+        return;
+      }
+      if (!panel?.contains(document.activeElement) || (event.shiftKey && document.activeElement === first)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("keydown", handleKeyDown);
+      if (previousFocus?.isConnected && previousFocus !== document.body) previousFocus.focus();
+      else inputRef.current?.focus();
+    };
+  }, [pendingApproval]);
 
   // Disable right-click context menu
   useEffect(() => {
@@ -1635,7 +1676,7 @@ function App() {
 
       {pendingApproval && (
         <div className="settings-overlay absolute inset-0 z-[60] flex items-center justify-center p-3 overflow-hidden animate-fade-in">
-          <div className="settings-panel rounded-xl animate-slide-up flex max-h-[calc(100dvh-24px)] w-[min(520px,calc(100vw-24px))] flex-col overflow-hidden" role="dialog" aria-modal="true" aria-label="Confirm execution">
+          <div ref={approvalPanelRef} className="settings-panel rounded-xl animate-slide-up flex max-h-[calc(100dvh-24px)] w-[min(520px,calc(100vw-24px))] flex-col overflow-hidden" role="dialog" aria-modal="true" aria-label="Confirm execution">
             <div className="shrink-0 border-b border-jarvs-border px-4 pb-3 pt-4 sm:px-5">
               <div className="flex items-center gap-2">
                 <AlertTriangle size={15} className="text-amber-400" />
@@ -1686,7 +1727,7 @@ function App() {
 
             {!showAddModel && (
               <nav className="settings-tabs" aria-label="Settings sections">
-                {(["general", "models", "personal", "advanced"] as const).map((tab) => (
+                {(["general", "models", "personal", "recovery", "advanced"] as const).map((tab) => (
                   <button type="button" key={tab} aria-current={settingsTab === tab ? "page" : undefined} onClick={() => setSettingsTab(tab)}>
                     {tab === "personal" ? "Memory & routines" : tab.charAt(0).toUpperCase() + tab.slice(1)}
                   </button>
@@ -1697,6 +1738,7 @@ function App() {
               {!showAddModel ? (
                 <>
                 {/* General Settings */}
+                {settingsTab === "recovery" && <RecoveryPanel />}
                 <div hidden={settingsTab !== "general"}>
                 <label className="block text-xs font-semibold text-jarvs-text mb-1.5 tracking-wider">Theme:</label>
                 <select
@@ -2167,7 +2209,6 @@ function App() {
                 {msg.content && (
                   <p className="whitespace-pre-wrap text-sm m-0 leading-relaxed">{msg.content}</p>
                 )}
-                {msg.status === "stopped" && <p className="not-prose text-xs text-jarvs-text-muted m-0">Response stopped</p>}
                 {msg.specialist && (
                   <span className="specialist-message-badge">
                     {msg.specialist.runtime} · {HERMES_CAPABILITIES.find(({ value }) => value === msg.specialist?.capability)?.label || msg.specialist.capability}
@@ -2223,6 +2264,7 @@ function App() {
                     </ReactMarkdown>
                   </div>
                 )}
+                {msg.status === "stopped" && <p role="status" className="not-prose text-xs text-jarvs-text-muted m-0">Response stopped</p>}
               </div>
             )}
           </div>
