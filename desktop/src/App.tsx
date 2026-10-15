@@ -7,6 +7,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import "./App.css";
 import RecoveryPanel from "./RecoveryPanel";
+import ToolApprovalPreview, { type ApprovalArguments } from "./ToolApprovalPreview";
 import { createDaemonWebSocket, daemonFetch } from "./daemonClient";
 import { THEME_OPTIONS, getThemeAttribute, normalizeThemeName, type ThemeName } from "./themes";
 
@@ -102,7 +103,7 @@ type ChatEvent = {
   approval_id?: string;
   tool_name?: string;
   title?: string;
-  arguments?: Record<string, unknown> & { language?: string; code?: string };
+  arguments?: ApprovalArguments;
   invocation_hash?: string;
   expires_at?: string;
   fallback?: {
@@ -120,8 +121,7 @@ type ChatEvent = {
 type PendingApproval = Required<Pick<ChatEvent, "approval_id" | "session_id" | "generation_id">> & {
   title: string;
   toolName: string;
-  language: string;
-  code: string;
+  arguments: ApprovalArguments;
 };
 
 type NewSessionRequest = {
@@ -618,13 +618,13 @@ function App() {
     if (!pendingApproval) return;
     const panel = approvalPanelRef.current;
     const previousFocus = document.activeElement as HTMLElement | null;
-    const getButtons = () => Array.from(panel?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
-    const timer = window.setTimeout(() => getButtons()[0]?.focus(), 0);
+    const getControls = () => Array.from(panel?.querySelectorAll<HTMLElement>('button:not(:disabled), [tabindex="0"]') ?? []);
+    const timer = window.setTimeout(() => panel?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus(), 0);
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Tab") return;
-      const buttons = getButtons();
-      const first = buttons[0];
-      const last = buttons[buttons.length - 1];
+      const controls = getControls();
+      const first = controls[0];
+      const last = controls[controls.length - 1];
       if (!first || !last) {
         event.preventDefault();
         return;
@@ -945,8 +945,7 @@ function App() {
             generation_id: data.generation_id,
             title: data.title || "Confirm execution",
             toolName: data.tool_name || "tool",
-            language: data.arguments?.language || "text",
-            code: data.arguments?.code || (data.arguments ? JSON.stringify(data.arguments, null, 2) : ""),
+            arguments: data.arguments || {},
           });
           setApprovalSubmitting(false);
         } else if (data.type === "started") {
@@ -1684,8 +1683,8 @@ function App() {
               </div>
               <p className="mt-1 text-[11px] text-jarvs-text-muted">{pendingApproval.toolName}</p>
             </div>
-            <div className="min-h-0 flex-1 overflow-auto px-4 py-3 sm:px-5">
-              <pre className="whitespace-pre-wrap break-words rounded-lg border border-jarvs-border bg-black/20 p-3 text-[11px] leading-relaxed select-text"><code>{pendingApproval.code || "(no details available)"}</code></pre>
+            <div className="approval-preview-scroll min-h-0 flex-1 overflow-auto px-4 py-3 sm:px-5" tabIndex={pendingApproval.toolName === "workspace.edit_text" ? 0 : undefined} role="region" aria-label="Operation details">
+              <ToolApprovalPreview toolName={pendingApproval.toolName} arguments={pendingApproval.arguments} />
             </div>
             <div className="flex shrink-0 justify-end gap-2 border-t border-jarvs-border-strong px-4 py-3 sm:px-5">
               <button disabled={approvalSubmitting} onClick={() => void respondToApproval("deny")} className="danger-button px-3.5 py-1.5 rounded-lg text-sm disabled:opacity-50">Deny</button>

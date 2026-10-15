@@ -1,11 +1,29 @@
 # Piano di sviluppo Jarvs per area
 
-Aggiornato: 17 settembre 2026. Stato: **piano con avanzamento del lotto autorizzato**.
+Aggiornato: 15 ottobre 2026. Stato: **piano con avanzamento del lotto autorizzato**.
 
-## Lotto autorizzato dopo il piano
+## Lotto del 15 ottobre: esecuzione e anteprima dei file
+
+Per il proseguimento autorizzato dall'utente sono selezionati EXEC-1 e FILE-1.2,
+con massimo due sottoagenti su backend e interfaccia. Il risultato implementato è Stop
+coerente con gli effetti già avvenuti e una conferma leggibile delle sostituzioni
+prima di modificare un file. I dettagli delle prove e gli eventuali limiti sono
+registrati nella guida di testing. La suite integrata passa con 331 test; la QA
+browser verifica anteprima, conferme e regressioni di tastiera/scroll/Stop.
+
+Il lotto chiude anche due problemi di riservatezza emersi durante le prove:
+l'output mostrato solo localmente non viene conservato nel contesto cloud e la
+cronologia con risultati workspace viene esclusa dal modello quando l'invio al
+cloud è vietato, anche dopo un cambio di provider.
+
+Viene ricompilato anche l'eseguibile release locale, così il launcher
+può aprire le modifiche correnti. Questo passaggio verifica la build desktop,
+mentre microfono, scorciatoie e interazione nativa richiedono ancora una prova reale.
+
+## Lotto di settembre completato
 
 L'utente ha autorizzato i prossimi passi e il push, con massimo due sottoagenti.
-Il lotto corrente comprende AUD-1 e la parte verificabile di REL-1/UI-1, con
+Il lotto di settembre comprende AUD-1 e la parte verificabile di REL-1/UI-1, con
 correzioni circoscritte dei difetti trovati. Gli altri task restano nel backlog.
 La prova manuale su WebView2, microfono e scorciatoie reali resta distinta dai
 controlli browser automatizzati: questi ultimi non bastano a chiudere REL-1.

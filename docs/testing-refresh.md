@@ -1,7 +1,7 @@
 # Branch di testing: refresh Jarvs
 
 Branch: `codex/testing-refresh-2026-09-11`. Nessun merge su `main`.
-Documento aggiornato il 17 settembre 2026.
+Documento aggiornato il 15 ottobre 2026.
 
 ## Cosa contiene
 
@@ -16,9 +16,15 @@ Le novità di questo intervento sono:
   sperimentali meno esposti; correzioni alla selezione testo e allo scroll.
 - Stop della generazione identificata, senza azzerare la sessione. Il pulsante
   attende il termine effettivo: un provider bloccato può richiedere tempo per chiudersi.
+  Nel turno interrotto vengono conservate le coppie chiamata/risultato degli strumenti
+  conclusi; testo parziale e strumenti interrotti non entrano nel contesto successivo.
+  Senza strumenti conclusi, il prompt del turno interrotto non viene conservato.
 - `workspace.edit_text`: sostituzioni precise in un unico salvataggio, hash del
   file letto e numero di corrispondenze atteso. In caso di conflitto nessuna modifica
   del batch viene applicata. Restano i limiti workspace, policy e script.
+  La conferma mostra percorso, versione del file, conteggi e testo prima/dopo.
+  Anteprime lunghe dichiarano i limiti: la conferma riguarda comunque l'intera
+  operazione. I contenuti del file vengono visualizzati come testo, non eseguiti.
 - Recupero conservativo dei run interrotti: nessuna riesecuzione automatica,
   esiti incerti da verificare, lock esclusivo del daemon e API di conferma.
 - Trascrizione con server locale OpenAI-compatible oppure Gemini esplicitamente
@@ -26,10 +32,12 @@ Le novità di questo intervento sono:
 
 ## Avvio e prove manuali
 
-Nel checkout già usato per lo sviluppo, verificare di essere su questo branch,
-poi avviare `jarvs_dev.vbs`; in alternativa seguire Quick start nel README.
-Non usare il launcher release per verificare la nuova UI finché l'eseguibile
-release non è stato ricompilato: potrebbe aprire la versione precedente.
+Nel checkout già usato per lo sviluppo, verificare di essere su questo branch.
+L'eseguibile release locale è stato ricompilato con il lotto del 15 ottobre:
+si può avviare da `jarvs_launcher.vbs`. Dopo nuovi aggiornamenti del sorgente,
+ricompilare con `npm --prefix desktop run build:desktop` prima di usare questo launcher.
+Per lo sviluppo resta disponibile `jarvs_dev.vbs`; per un checkout nuovo seguire
+Quick start nel README. L'eseguibile locale non è un installer pubblicato.
 
 1. Aprire Jarvs con la scorciatoia e verificare composer compatto, testo su più
    righe, allegati, leggibilità e impostazioni alle dimensioni abituali di Windows.
@@ -60,7 +68,7 @@ processi e file temporanei isolati.
 
 ## Verifiche e limiti
 
-La suite Python integrata è stata eseguita con successo (319 test, uno escluso
+La suite Python integrata è stata eseguita con successo (331 test, uno escluso
 per configurazione); il build frontend TypeScript/Vite e i 10 test Rust sono
 riusciti. Il controllo visivo su Edge con dati simulati ha verificato home e
 impostazioni, senza errori JavaScript o overflow orizzontale. I test
@@ -86,7 +94,27 @@ si trova altrove, impostare `JARVS_PLAYWRIGHT_PATH` alla directory del pacchetto
 `JARVS_BROWSER_CHANNEL` permette di scegliere un altro canale compatibile installato.
 Gli script servono il build su una porta locale temporanea e usano dati simulati.
 
+La nuova anteprima file ha 8 controlli browser dedicati, ripetibili con
+`node scripts/file-approval-ui-qa.cjs` con gli stessi prerequisiti. Verificano
+conteggi, testo prima/dopo, contenuto HTML letterale, limiti espliciti, layout
+compatto e contratto approve/deny. I 9 controlli di regressione UI restano verdi.
+
 Le correzioni UI coprono il focus iniziale sul composer, il focus trattenuto nella
 conferma di esecuzione (inizialmente su Deny) e l'indicazione Response stopped
 sulla risposta dell'assistente. La QA controlla anche bozza multilinea, scroll
 durante lo streaming e dimensioni compatte; non sostituisce la prova nativa.
+
+## Stop e confine tra contesto locale e cloud
+
+Le prove automatiche includono Stop durante la sintesi dopo una scrittura riuscita,
+seconda approvazione di un batch, un processo Python effettivo e uno stream HTTP
+locale bloccato. Il run interrotto termina come cancelled; le operazioni già
+concluse mantengono il proprio esito. Un'approvazione interrotta non è riutilizzabile.
+
+Con invio workspace al cloud negato, il risultato può essere mostrato localmente
+ma la cronologia salva solo una notifica neutra. Se la conversazione contiene
+risultati workspace precedenti o risposte da essi derivate, tutto il contesto storico
+viene escluso dalle richieste cloud: la chat visibile resta disponibile e il modello
+locale può ancora usarlo. Reset azzera questo vincolo; autorizzare l'invio workspace
+al cloud permette nuovamente l'uso del contesto. Il comportamento conservativo evita
+di dedurre dal solo testo di una risposta se contiene dati locali.
