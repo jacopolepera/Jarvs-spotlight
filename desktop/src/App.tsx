@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { Settings, Paperclip, X, Minus, Zap, Cloud, Monitor, Trash2, AlertTriangle, ChevronRight, ChevronDown, Plus, Mic, ArrowUp, ArrowDown, Square } from "lucide-react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -287,6 +287,9 @@ function App() {
   const settingsPanelRef = useRef<HTMLDivElement>(null);
   const approvalPanelRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [composerWindowHeight, setComposerWindowHeight] = useState(120);
+  const resizeQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const resizeRequestRef = useRef(0);
   const chatHistoryRef = useRef<HTMLDivElement>(null);
   const followMessagesRef = useRef(true);
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
@@ -366,7 +369,7 @@ function App() {
     }
   }, [hermesSelectable, hermesStatusLoading, responseMode]);
 
-  const windowMode: WindowMode = messages.length > 0 || showSettings || pendingApproval !== null || sessionError !== null || input.includes("\n") || input.length > 160 || (attachments.length > 0 && hermesEnabled)
+  const windowMode: WindowMode = messages.length > 0 || showSettings || pendingApproval !== null || sessionError !== null || (attachments.length > 0 && hermesEnabled)
     ? "expanded"
     : attachments.length > 0 || hermesEnabled
       ? "compactTall"
@@ -674,12 +677,35 @@ function App() {
     }
   }, [messages]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const textarea = inputRef.current;
     if (!textarea) return;
-    textarea.style.height = "auto";
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
-  }, [input, windowMode]);
+    const measure = () => {
+      textarea.style.height = "auto";
+      const naturalHeight = textarea.scrollHeight;
+      textarea.style.height = `${Math.min(naturalHeight, 160)}px`;
+      if (windowMode !== "expanded") {
+        const titlebar = document.querySelector<HTMLElement>(".titlebar");
+        const composer = textarea.closest<HTMLElement>(".composer-wrapper");
+        if (titlebar && composer) {
+          // Keep the draft layout compact; grow only enough to fit the measured
+          // contents. Bounding boxes include the user's content zoom.
+          setComposerWindowHeight(Math.max(120, Math.ceil(
+            titlebar.getBoundingClientRect().height + composer.getBoundingClientRect().height + 2
+          )));
+        }
+      }
+    };
+    measure();
+    let width = textarea.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (textarea.clientWidth === width) return;
+      width = textarea.clientWidth;
+      measure();
+    });
+    observer.observe(textarea);
+    return () => observer.disconnect();
+  }, [input, windowMode, zoomLevel]);
 
   useEffect(() => {
     showSettingsRef.current = showSettings;
@@ -691,10 +717,19 @@ function App() {
 
   useEffect(() => {
     if (!isTauri()) return;
-    invoke("set_main_window_mode", { mode: windowMode }).catch((error) => {
+    const request = ++resizeRequestRef.current;
+    // Native size changes must finish in order. An older expanded request must
+    // never win over the compact layout requested after clearing/closing.
+    resizeQueueRef.current = resizeQueueRef.current.catch(() => undefined).then(async () => {
+      if (request !== resizeRequestRef.current) return;
+      await invoke("set_main_window_mode", {
+        mode: windowMode,
+        height: windowMode === "expanded" ? undefined : composerWindowHeight,
+      });
+    }).catch((error) => {
       console.error(`Failed to switch Jarvs to ${windowMode} window mode`, error);
     });
-  }, [windowMode]);
+  }, [windowMode, composerWindowHeight]);
 
   useEffect(() => {
     if (!showSettings) return;

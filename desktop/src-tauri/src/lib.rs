@@ -203,8 +203,28 @@ fn window_dimensions(mode: &str) -> Result<WindowDimensions, String> {
     }
 }
 
-fn apply_window_mode<R: Runtime>(window: &WebviewWindow<R>, mode: &str) -> Result<(), String> {
-    let dimensions = window_dimensions(mode)?;
+fn window_layout(mode: &str, height: Option<f64>) -> Result<WindowDimensions, String> {
+    let mut dimensions = window_dimensions(mode)?;
+    if mode != "expanded" {
+        if let Some(height) = height {
+            if !height.is_finite() {
+                return Err("window height must be finite".to_string());
+            }
+            dimensions.height = height.clamp(COMPACT_WINDOW_HEIGHT, 420.0);
+        }
+    }
+    Ok(dimensions)
+}
+
+fn apply_window_mode<R: Runtime>(window: &WebviewWindow<R>, mode: &str, height: Option<f64>) -> Result<(), String> {
+    let mut dimensions = window_layout(mode, height)?;
+    if mode != "expanded" && height.is_some() {
+        // Preserve a manually narrowed draft window while increasing its height.
+        dimensions.width = window.inner_size()
+            .map_err(|error| format!("failed to read window size: {error}"))?
+            .to_logical::<f64>(window.scale_factor().map_err(|error| error.to_string())?)
+            .width.max(COMPACT_MIN_WIDTH);
+    }
     window
         .set_min_size(Some(LogicalSize::new(
             dimensions.min_width,
@@ -1057,11 +1077,11 @@ fn toggle_main_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_main_window_mode(window: WebviewWindow, mode: String) -> Result<(), String> {
+fn set_main_window_mode(window: WebviewWindow, mode: String, height: Option<f64>) -> Result<(), String> {
     if window.label() != MAIN_WINDOW_LABEL {
         return Err("window mode can only be changed for the main window".to_string());
     }
-    apply_window_mode(&window, &mode)
+    apply_window_mode(&window, &mode, height)
 }
 
 #[tauri::command]
@@ -1383,6 +1403,17 @@ mod tests {
         assert_eq!((expanded.width, expanded.height), (600.0, 500.0));
         assert_eq!((expanded.min_width, expanded.min_height), (300.0, 200.0));
         assert!(window_dimensions("unknown").is_err());
+    }
+
+    #[test]
+    fn draft_height_grows_and_shrinks_without_opening_a_conversation() {
+        use super::{window_layout, EXPANDED_WINDOW_HEIGHT};
+        assert_eq!(window_layout("compact", Some(190.0)).unwrap().height, 190.0);
+        assert_eq!(window_layout("compact", Some(120.0)).unwrap().height, 120.0);
+        assert_eq!(window_layout("compact", Some(10.0)).unwrap().height, 120.0);
+        assert_eq!(window_layout("compact", Some(900.0)).unwrap().height, 420.0);
+        assert!(window_layout("compact", Some(f64::NAN)).is_err());
+        assert_eq!(window_layout("expanded", Some(120.0)).unwrap().height, EXPANDED_WINDOW_HEIGHT);
     }
 
     #[test]

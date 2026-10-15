@@ -2,6 +2,11 @@
 
 Aggiornato: 15 ottobre 2026. Stato: **piano con avanzamento del lotto autorizzato**.
 
+Correzione UI verificata dopo la segnalazione del composer: la finestra cresce
+in base all'ingombro effettivo della bozza e torna compatta svuotando il campo o
+chiudendo le impostazioni. Sono stati verificati screenshot dell'app Windows reale,
+oltre a test browser con ridimensionamento simulato e test del comando Rust.
+
 ## Lotto del 15 ottobre: esecuzione e anteprima dei file
 
 Per il proseguimento autorizzato dall'utente sono selezionati EXEC-1 e FILE-1.2,

@@ -55,6 +55,58 @@ const http = require('node:http');
     await composer.waitFor(); await pause();
     await check('600x120: ready composer gets keyboard focus',async()=>assert.equal(await composer.evaluate(el=>document.activeElement===el),true));
     await check('600x120: compact controls fit',async()=>{for(const locator of [composer,page.getByRole('button',{name:'Attach file',exact:true})]) {const box=await locator.boundingBox();assert(box&&box.x>=0&&box.y>=0&&box.x+box.width<=600&&box.y+box.height<=120);} });
+    await page.exposeFunction('qaResizeWindow',async layout=>{
+      const width=layout.mode==='expanded'?600:page.viewportSize().width;
+      await page.setViewportSize({width,height:layout.mode==='expanded'?500:layout.height || 120});
+    });
+    await page.evaluate(()=>{
+      window.isTauri=true;
+      window.__qa.originalInvoke=window.__TAURI_INTERNALS__.invoke;
+      window.__qa.activeResizes=0; window.__qa.maxActiveResizes=0; window.__qa.layouts=[];
+      window.__TAURI_INTERNALS__.invoke=async (command,args)=>{
+        if(command!=='set_main_window_mode') return window.__qa.originalInvoke(command,args);
+        window.__qa.activeResizes++;
+        window.__qa.maxActiveResizes=Math.max(window.__qa.maxActiveResizes,window.__qa.activeResizes);
+        try {
+          await new Promise(resolve=>setTimeout(resolve,args.mode==='expanded'?100:10));
+          await window.qaResizeWindow(args);
+          window.__qa.layouts.push(args);
+        } finally {window.__qa.activeResizes--;}
+      };
+    });
+    await check('fresh chat: wrapped draft grows only the composer window',async()=>{
+      const draft='CIAO '.repeat(28).trim();
+      assert(draft.length<160 && !draft.includes('\n'));
+      await composer.fill(draft);
+      await page.waitForFunction(()=>window.innerHeight>120 && window.__qa.activeResizes===0);
+      assert(page.viewportSize().height<300);
+      assert.equal(await page.locator('.app-shell').getAttribute('data-window-mode'),'compact');
+      assert.equal(await composer.inputValue(),draft);
+      const box=await composer.boundingBox(); assert(box && box.y+box.height<=page.viewportSize().height);
+      assert.equal(await page.evaluate(()=>window.__qa.sent.length),0);
+      await composer.fill('');
+      await page.waitForFunction(()=>window.innerHeight===120 && window.__qa.activeResizes===0);
+    });
+    await check('fresh chat: narrowing remeasures, clearing restores compact height',async()=>{
+      const draft='CIAO '.repeat(9).trim();
+      await composer.fill(draft); await pause();
+      await page.setViewportSize({width:300,height:120});
+      await page.waitForFunction(()=>window.innerHeight>120 && window.__qa.activeResizes===0);
+      assert.equal(await composer.inputValue(),draft);
+      assert.equal(page.viewportSize().width,300);
+      await composer.fill('');
+      await page.waitForFunction(()=>window.innerHeight===120 && window.__qa.activeResizes===0);
+      await page.setViewportSize({width:600,height:120});
+    });
+    await check('empty chat: closing settings cannot leave a stale expanded window',async()=>{
+      await page.getByRole('button',{name:'Open settings',exact:true}).click();
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(()=>window.__qa.activeResizes===0 && window.innerHeight===120);
+      assert.equal(await page.locator('.app-shell').getAttribute('data-window-mode'),'compact');
+      assert.equal(await page.evaluate(()=>window.__qa.maxActiveResizes),1);
+      assert.equal(await composer.inputValue(),'');
+    });
+    await page.evaluate(()=>{window.isTauri=false;window.__TAURI_INTERNALS__.invoke=window.__qa.originalInvoke;});
     await page.setViewportSize({width:800,height:700});
     await page.getByRole('button',{name:'Open settings',exact:true}).click(); await pause();
     await check('settings: focus wraps and Escape restores trigger',async()=>{
@@ -67,7 +119,7 @@ const http = require('node:http');
     });
     if(await page.getByRole('dialog').count()) await page.keyboard.press('Escape');
     await composer.fill('first'); await composer.press('Shift+Enter'); await composer.press('End'); await composer.type('second');
-    await check('composer: Shift+Enter keeps a draft',async()=>{assert.equal(await composer.inputValue(),'first\nsecond');assert.equal(await page.evaluate(()=>window.__qa.sent.length),0);});
+    await check('composer: Shift+Enter keeps a draft',async()=>{assert.equal(await composer.inputValue(),'first\nsecond');assert.equal(await page.locator('.app-shell').getAttribute('data-window-mode'),'compact');assert.equal(await page.evaluate(()=>window.__qa.sent.length),0);});
     await composer.fill('hold'); await composer.press('Enter'); await pause();
     await composer.fill('next draft'); await page.getByRole('button',{name:'Stop response',exact:true}).click(); await pause();
     await check('Stop: partial answer, visible status and draft preserved',async()=>{assert.equal(await page.getByText('Response stopped',{exact:true}).count(),1);assert.equal(await composer.inputValue(),'next draft');assert(await page.getByText('Partial response',{exact:true}).count());});

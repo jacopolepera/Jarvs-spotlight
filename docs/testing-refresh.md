@@ -118,3 +118,27 @@ viene escluso dalle richieste cloud: la chat visibile resta disponibile e il mod
 locale può ancora usarlo. Reset azzera questo vincolo; autorizzare l'invio workspace
 al cloud permette nuovamente l'uso del contesto. Il comportamento conservativo evita
 di dedurre dal solo testo di una risposta se contiene dati locali.
+
+## Controllo del composer e della finestra nativa
+
+La bozza iniziale mantiene il layout compatto: il testo su più righe aumenta solo
+l'altezza necessaria al composer (fino al limite del campo), senza aprire la vista
+conversazione. Svuotando il campo si torna all'altezza compatta. Le richieste native
+di ridimensionamento sono ordinate e quelle superate vengono ignorate.
+
+La QA browser include ora un simulatore del comando nativo con completamenti
+ritardati: verifica la dimensione effettivamente richiesta, non solo l'attributo
+CSS del layout. Copre a capo automatico sotto 160 caratteri, restringimento manuale,
+svuotamento e apertura/chiusura rapida delle impostazioni.
+
+Per le modifiche al layout, prima della consegna verificare anche la build Windows
+reale con screenshot e strumenti di accessibilità: chat vuota, testo lungo senza
+invio, Shift+Invio, cancellazione della bozza, ritorno dalle impostazioni. Conservare
+eventuali bozze dell'utente e non inviare messaggi di prova a un modello. Le prove
+browser e la build riuscita da sole non dimostrano che la finestra nativa si adatti.
+
+Verifica Windows eseguita sulla release corretta: bozza di 139 caratteri senza invio
+su quattro righe, finestra 602×170 nello screenshot (bordi inclusi), testo e pulsante
+visibili; svuotamento riportato a 602×122; apertura e chiusura delle impostazioni
+riportata a 602×122. Nessun messaggio è stato inviato durante queste prove. Superati
+12 controlli browser, inclusi i comandi nativi simulati, e 11 test Rust.
