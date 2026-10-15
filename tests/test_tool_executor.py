@@ -100,6 +100,33 @@ def test_auto_run_executes_once_through_registry_policy_and_executor(tmp_path):
     assert "secret input" not in str([event.as_dict() for event in events])
 
 
+def test_stop_after_handler_effect_preserves_completed_result(tmp_path):
+    def handler(arguments, context):
+        (context.workspace_root / "done.txt").write_text(arguments["text"])
+        context.cancelled.set()
+        return {"written": True}
+
+    executor, _broker, context, events = build_executor(tmp_path, "auto_run", handler)
+    result = asyncio.run(executor.execute(
+        context, ToolInvocation.create("test.echo", {"text": "completed"})
+    ))
+    assert result.status is ToolStatus.COMPLETED
+    assert result.output == {"written": True}
+    assert (tmp_path / "done.txt").read_text() == "completed"
+    assert events[-1].type == EventType.TOOL_COMPLETED.value
+
+
+def test_backend_cancellation_result_is_not_relabelled_completed(tmp_path):
+    executor, _broker, context, events = build_executor(
+        tmp_path, "auto_run", lambda *_args: {"cancelled": True}
+    )
+    result = asyncio.run(executor.execute(
+        context, ToolInvocation.create("test.echo", {"text": "cancel"})
+    ))
+    assert result.status is ToolStatus.CANCELLED
+    assert events[-1].type == EventType.TOOL_CANCELLED.value
+
+
 def test_deny_all_never_reaches_handler(tmp_path):
     calls = []
     executor, _broker, context, events = build_executor(

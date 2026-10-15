@@ -183,6 +183,60 @@ def test_cancellation_closes_a_blocked_provider_stream(monkeypatch):
     assert errors and errors[0].code == "generation_cancelled"
 
 
+def test_stop_interrupts_real_socket_read_without_waiting_for_provider_timeout():
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.flush()
+            entered.set()
+            release.wait(5)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    context = ProviderContext(
+        model_id="local", model="fixture", destination=ProviderDestination.LOCAL,
+        api_base=f"http://127.0.0.1:{server.server_port}/v1", api_key="fixture",
+    )
+    cancelled = threading.Event()
+    errors = []
+
+    def consume():
+        try:
+            list(OpenAICompatibleAdapter(read_timeout_seconds=20).stream(
+                context, ModelRequest(messages=[{"role": "user", "content": "wait"}]), cancelled,
+            ))
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=consume, daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(2)
+        cancelled.set()
+        worker.join(1)
+        assert not worker.is_alive()
+        assert len(errors) == 1
+        assert errors[0].code == "generation_cancelled"
+    finally:
+        cancelled.set()
+        release.set()
+        worker.join(3)
+        server.shutdown()
+        server.server_close()
+
+
 @pytest.mark.lmstudio
 def test_lm_studio_native_fast_path_smoke():
     api_base = os.environ.get("JARVS_LM_STUDIO_URL", "http://127.0.0.1:1234/v1")

@@ -102,20 +102,29 @@ class ShortTermTranscript:
 
     def __init__(self) -> None:
         self._messages: list[dict[str, Any]] = []
+        self._contains_workspace_content = False
         self._lock = threading.RLock()
 
-    def snapshot(self) -> list[dict[str, Any]]:
+    def snapshot(self, *, allow_workspace: bool = True) -> list[dict[str, Any]]:
         with self._lock:
+            # Summaries and later answers can derive from earlier tool output.
+            # Keep this conservative marker across commits and history trimming
+            # until reset; stripping only tool messages would still leak them.
+            if not allow_workspace and self._contains_workspace_content:
+                return []
             return copy.deepcopy(self._messages)
 
     def commit(self, messages: Sequence[Mapping[str, Any]]) -> None:
         with self._lock:
+            if any(message.get("role") == "tool" for message in messages):
+                self._contains_workspace_content = True
             self._messages.extend(copy.deepcopy([dict(item) for item in messages]))
             self._bound()
 
     def clear(self) -> None:
         with self._lock:
             self._messages.clear()
+            self._contains_workspace_content = False
 
     def _bound(self) -> None:
         if len(self._messages) > MAX_SESSION_MESSAGES:
@@ -260,9 +269,19 @@ class RunCoordinator:
             EventType.RUN_CANCELLED.value,
             EventType.RUN_FAILED.value,
         }
+        # Only runtime-confirmed tool results survive an interrupted answer.
+        # Keep each call/result pair closed, even when Stop interrupts a batch.
+        completed_tool_messages: list[dict[str, Any]] = []
         try:
-            yield from self._stream_run(generation, incoming, transcript, events)
+            yield from self._stream_run(
+                generation, incoming, transcript, events, completed_tool_messages
+            )
         except ModelGenerationCancelled:
+            if completed_tool_messages:
+                transcript.commit(
+                    _history_safe_messages(_incoming_to_openai(incoming))
+                    + completed_tool_messages
+                )
             if events.last_type not in terminal_types:
                 yield _activity(
                     events.emit(
@@ -290,6 +309,7 @@ class RunCoordinator:
         incoming: Sequence[Mapping[str, Any]],
         transcript: ShortTermTranscript,
         events: RunEventStream,
+        completed_tool_messages: list[dict[str, Any]],
     ) -> Iterator[dict[str, Any]]:
         started = events.emit(
             EventType.RUN_STARTED,
@@ -327,7 +347,11 @@ class RunCoordinator:
             memory_context = self.memory_context_provider(prompt_text).strip()
             if memory_context:
                 system_prompt = f"{system_prompt}\n\n{memory_context}"
-        current_messages = transcript.snapshot() + _incoming_to_openai(incoming)
+        current_messages = transcript.snapshot(
+            allow_workspace=self.egress_policy.evaluate(
+                provider.destination, DataClass.WORKSPACE_CONTENT
+            ).allowed
+        ) + _incoming_to_openai(incoming)
         committed: list[dict[str, Any]] = _history_safe_messages(_incoming_to_openai(incoming))
         tools, reverse_names = self._tools_for(generation)
         catalog_hint = None
@@ -359,6 +383,8 @@ class RunCoordinator:
                 generation.tool_invocation,
                 events,
             )
+            if result.status is ToolStatus.CANCELLED:
+                raise ModelGenerationCancelled("The generation was cancelled.")
             if result.status is not ToolStatus.COMPLETED:
                 yield {
                     "role": "jarvs",
@@ -374,7 +400,7 @@ class RunCoordinator:
             if not self._egress_allowed(provider, result):
                 text = self._local_only_result(provider, result)
                 yield {"role": "assistant", "type": "message", "content": text}
-                committed.append({"role": "assistant", "content": text})
+                committed.append(self._local_only_history_message())
                 transcript.commit(committed)
                 yield _activity(events.emit(EventType.RUN_COMPLETED, {"local_only": True}))
                 return
@@ -400,6 +426,7 @@ class RunCoordinator:
             }
             current_messages.extend([assistant_call, tool_message])
             committed.extend([assistant_call, tool_message])
+            completed_tool_messages.extend([assistant_call, tool_message])
             # A structured invocation is already planned and executed.  The
             # follow-up model call summarizes it but cannot silently expand the action.
             tools = []
@@ -471,16 +498,7 @@ class RunCoordinator:
             )
             model_duration_ms = (time.perf_counter() - model_started_at) * 1000
             if generation.cancelled.is_set():
-                yield _activity(
-                    events.emit(
-                        EventType.RUN_CANCELLED,
-                        {
-                            "reason_code": "generation_cancelled",
-                            "phase": model_phase,
-                        },
-                    )
-                )
-                return
+                raise ModelGenerationCancelled("The generation was cancelled.")
             yield _activity(
                 events.emit(
                     EventType.MODEL_COMPLETED,
@@ -708,6 +726,8 @@ class RunCoordinator:
                     invocation_id=raw_call.call_id or uuid.uuid4().hex,
                 )
                 result = yield from self._execute_tool(generation, invocation, events)
+                if result.status is ToolStatus.CANCELLED:
+                    raise ModelGenerationCancelled("The generation was cancelled.")
                 call_id = raw_call.call_id or f"call_{invocation.invocation_id}"
                 recoverable_rejection = (
                     result.status is ToolStatus.DENIED
@@ -758,7 +778,7 @@ class RunCoordinator:
                 if not self._egress_allowed(provider, result):
                     text = self._local_only_result(provider, result)
                     yield {"role": "assistant", "type": "message", "content": text}
-                    committed.append({"role": "assistant", "content": text})
+                    committed.append(self._local_only_history_message())
                     transcript.commit(committed)
                     yield _activity(events.emit(EventType.RUN_COMPLETED, {"local_only": True}))
                     return
@@ -782,6 +802,13 @@ class RunCoordinator:
                         "tool_call_id": call_id,
                         "content": json.dumps(result.output, ensure_ascii=False),
                     }
+                )
+                completed_tool_messages.extend(
+                    [
+                        {"role": "assistant", "content": None,
+                         "tool_calls": [assistant_calls[-1]]},
+                        tool_messages[-1],
+                    ]
                 )
             assistant_message = {
                 "role": "assistant",
@@ -1191,6 +1218,15 @@ class RunCoordinator:
             f"Tool `{result.tool_name}` ran locally, but its result was not sent to "
             f"the cloud model (`{reason}`).\n\n```json\n{output}\n```"
         )
+
+    @staticmethod
+    def _local_only_history_message() -> dict[str, str]:
+        # The UI may display local output, but the next model request must not
+        # recover that denied output through assistant history.
+        return {
+            "role": "assistant",
+            "content": "A local tool completed. Its output was withheld from the cloud model.",
+        }
 
     @staticmethod
     def _deterministic_tool_result(results: Sequence[ToolResult]) -> str:

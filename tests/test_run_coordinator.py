@@ -7,7 +7,7 @@ from core.agent.action_routing import ACTION_DISPATCH_PROVIDER_NAME
 from core.agent.coordinator import NativeSessionService, RunCoordinator, load_system_prompt
 from core.agent.egress import DataEgressPolicy
 from core.agent.executor import ToolExecutor
-from core.agent.model_adapter import ModelStreamEvent, ModelToolCallDelta, ProviderRequestError
+from core.agent.model_adapter import ModelGenerationCancelled, ModelStreamEvent, ModelToolCallDelta, ProviderRequestError
 from core.agent.routing import RoutingSignal
 from core.agent.script_tools import register_script_tools
 from core.agent.system_tools import register_system_tools
@@ -882,7 +882,8 @@ def test_reset_cancels_native_generation_and_clears_short_session(tmp_path):
     assert result["previous_session_id"] == "session"
     assert result["invalidated_generation_id"] == "generation"
     assert not worker.is_alive()
-    assert errors == []
+    assert len(errors) == 1
+    assert isinstance(errors[0], ModelGenerationCancelled)
 
 
 def _consume(native, generation, errors):

@@ -391,13 +391,13 @@ class ToolExecutor:
             )
 
         duration_ms = (time.perf_counter() - started) * 1000
-        if context.cancelled.is_set():
+        # A returned result confirms that the handler finished. Stop may have
+        # arrived after its effect (for example an atomic file replacement);
+        # relabelling success as cancellation would hide that completed effect.
+        # Interruptible backends raise when they actually stop an operation.
+        if isinstance(normalized_output, Mapping) and normalized_output.get("cancelled") is True:
             return self._cancelled(
-                context,
-                invocation,
-                intent,
-                "execution_cancelled",
-                duration_ms=duration_ms,
+                context, invocation, intent, "execution_cancelled", duration_ms=duration_ms
             )
 
         audit_reason = None
