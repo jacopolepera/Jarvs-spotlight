@@ -142,3 +142,20 @@ su quattro righe, finestra 602×170 nello screenshot (bordi inclusi), testo e pu
 visibili; svuotamento riportato a 602×122; apertura e chiusura delle impostazioni
 riportata a 602×122. Nessun messaggio è stato inviato durante queste prove. Superati
 12 controlli browser, inclusi i comandi nativi simulati, e 11 test Rust.
+
+## Zoom da tastiera
+
+Ctrl+più (anche Ctrl+= o Ctrl+Shift+=) ingrandisce l'interfaccia di 10 punti
+percentuali; Ctrl+meno la riduce. Ctrl+0 ripristina il 100%. Sono supportati anche
+più/meno del tastierino numerico. I limiti restano 60–160% e Ctrl+rotella conserva
+il passo del 5%. Le scorciatoie non inviano né modificano la bozza.
+
+Sviluppo TDD: prima dell'implementazione i due nuovi controlli fallivano perché
+lo zoom restava al 100%. Dopo l'implementazione passano 14 controlli UI totali,
+inclusi conservazione della bozza e contenimento del composer nella finestra
+ridimensionata durante lo zoom. Il fattore è condiviso con Ctrl+rotella.
+
+Verifica nativa del 16 ottobre: Ctrl+ (tasto principale e tastierino) ha ingrandito
+la bozza mantenendola intera, con finestra adattata da 602×146 a 602×157 nello
+screenshot. Ctrl− e Ctrl+0 hanno ripristinato 602×146; svuotando la sola bozza
+di prova la finestra è tornata a 602×122. Nessun messaggio è stato inviato.

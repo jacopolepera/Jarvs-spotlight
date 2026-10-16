@@ -74,6 +74,39 @@ const http = require('node:http');
         } finally {window.__qa.activeResizes--;}
       };
     });
+    const readZoom=()=>composer.evaluate(el=>Number(el.closest('.composer-wrapper').parentElement.style.zoom || 1));
+    await check('zoom: Ctrl plus and minus change the interface without editing the draft',async()=>{
+      await composer.fill('Zoom draft');
+      await composer.press('Control+Equal'); await pause();
+      assert.equal(await readZoom(),1.1);
+      await composer.press('Control+Minus'); await pause();
+      assert.equal(await readZoom(),1);
+      await composer.press('Control+Shift+Equal'); await pause();
+      assert.equal(await readZoom(),1.1);
+      assert.equal(await composer.inputValue(),'Zoom draft');
+      assert.equal(await page.evaluate(()=>window.__qa.sent.length),0);
+      await composer.press('Control+Digit0'); await pause();
+      assert.equal(await readZoom(),1);
+      await composer.fill('');
+    });
+    await check('zoom: limits and reset also keep a wrapped draft inside the native window',async()=>{
+      await composer.press('Control+Digit0');
+      await composer.fill('CIAO '.repeat(28).trim());
+      for(let index=0;index<10;index++) await composer.press('Control+Equal');
+      await pause();
+      assert.equal(await readZoom(),1.6);
+      await page.waitForFunction(()=>window.__qa.activeResizes===0);
+      const box=await composer.boundingBox();
+      assert(box && box.y+box.height<=page.viewportSize().height+1);
+      for(let index=0;index<15;index++) await composer.press('Control+Minus');
+      await pause();
+      assert.equal(await readZoom(),0.6);
+      await composer.press('Control+Digit0'); await pause();
+      assert.equal(await readZoom(),1);
+      assert.equal(await composer.inputValue(),'CIAO '.repeat(28).trim());
+      await composer.fill('');
+      await page.waitForFunction(()=>window.innerHeight===120 && window.__qa.activeResizes===0);
+    });
     await check('fresh chat: wrapped draft grows only the composer window',async()=>{
       const draft='CIAO '.repeat(28).trim();
       assert(draft.length<160 && !draft.includes('\n'));

@@ -656,19 +656,36 @@ function App() {
     return () => document.removeEventListener("contextmenu", handler);
   }, []);
 
-  // Zoom with Ctrl+Scroll
+  // Use one zoom state for keyboard and wheel so composer sizing stays in sync.
   useEffect(() => {
+    const adjustZoom = (delta: number) => setZoomLevel(previous =>
+      Math.min(1.6, Math.max(0.6, Math.round((previous + delta) * 100) / 100))
+    );
     const handleWheel = (e: WheelEvent) => {
-      if (e.ctrlKey) {
+      if (e.ctrlKey && e.deltaY !== 0) {
         e.preventDefault();
-        setZoomLevel(prev => {
-          const delta = e.deltaY > 0 ? -0.05 : 0.05;
-          return Math.min(1.6, Math.max(0.6, Math.round((prev + delta) * 100) / 100));
-        });
+        adjustZoom(e.deltaY > 0 ? -0.05 : 0.05);
+      }
+    };
+    const handleZoomKey = (e: KeyboardEvent) => {
+      if (!e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return;
+      if (e.key === "+" || e.key === "=" || e.code === "NumpadAdd") {
+        e.preventDefault();
+        adjustZoom(0.1);
+      } else if (e.key === "-" || e.code === "NumpadSubtract") {
+        e.preventDefault();
+        adjustZoom(-0.1);
+      } else if (e.key === "0" || e.code === "Numpad0") {
+        e.preventDefault();
+        setZoomLevel(1);
       }
     };
     window.addEventListener("wheel", handleWheel, { passive: false });
-    return () => window.removeEventListener("wheel", handleWheel);
+    window.addEventListener("keydown", handleZoomKey, true);
+    return () => {
+      window.removeEventListener("wheel", handleWheel);
+      window.removeEventListener("keydown", handleZoomKey, true);
+    };
   }, []);
 
   useEffect(() => {
