@@ -159,3 +159,10 @@ Verifica nativa del 16 ottobre: Ctrl+ (tasto principale e tastierino) ha ingrand
 la bozza mantenendola intera, con finestra adattata da 602×146 a 602×157 nello
 screenshot. Ctrl− e Ctrl+0 hanno ripristinato 602×146; svuotando la sola bozza
 di prova la finestra è tornata a 602×122. Nessun messaggio è stato inviato.
+
+## Prove reali del modello caricato
+
+La [campagna QA del 16 ottobre](qa-lmstudio-2026-10-16.md) documenta i prompt
+inviati tramite Computer Use a Qwen3.5 4B in LM Studio, il confronto Thinking
+On/Off, routing, azioni su file sintetici, isolamento delle chat e Stop.
+Include difetti riprodotti e corretti in TDD e i limiti di routing ancora aperti.

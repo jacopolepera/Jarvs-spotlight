@@ -216,14 +216,20 @@ fn window_layout(mode: &str, height: Option<f64>) -> Result<WindowDimensions, St
     Ok(dimensions)
 }
 
-fn apply_window_mode<R: Runtime>(window: &WebviewWindow<R>, mode: &str, height: Option<f64>) -> Result<(), String> {
+fn apply_window_mode<R: Runtime>(
+    window: &WebviewWindow<R>,
+    mode: &str,
+    height: Option<f64>,
+) -> Result<(), String> {
     let mut dimensions = window_layout(mode, height)?;
     if mode != "expanded" && height.is_some() {
         // Preserve a manually narrowed draft window while increasing its height.
-        dimensions.width = window.inner_size()
+        dimensions.width = window
+            .inner_size()
             .map_err(|error| format!("failed to read window size: {error}"))?
             .to_logical::<f64>(window.scale_factor().map_err(|error| error.to_string())?)
-            .width.max(COMPACT_MIN_WIDTH);
+            .width
+            .max(COMPACT_MIN_WIDTH);
     }
     window
         .set_min_size(Some(LogicalSize::new(
@@ -872,6 +878,21 @@ fn daemon_runtime_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String
         })?;
     }
 
+    ensure_runtime_settings(&runtime)?;
+    Ok(runtime)
+}
+
+#[cfg(any(not(debug_assertions), test))]
+fn ensure_runtime_settings(runtime: &Path) -> Result<(), String> {
+    // This directory belongs to the packaged runtime. Never create or rewrite
+    // a custom workspace from settings here.
+    let workspace = runtime.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create managed workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
     let settings_path = runtime.join("settings.json");
     if !settings_path.exists() {
         let settings = serde_json::json!({
@@ -891,7 +912,7 @@ fn daemon_runtime_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String
         })?;
     }
 
-    Ok(runtime)
+    Ok(())
 }
 
 fn spawn_daemon<R: Runtime>(app: &AppHandle<R>) -> Result<ManagedDaemon, String> {
@@ -1077,7 +1098,11 @@ fn toggle_main_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_main_window_mode(window: WebviewWindow, mode: String, height: Option<f64>) -> Result<(), String> {
+fn set_main_window_mode(
+    window: WebviewWindow,
+    mode: String,
+    height: Option<f64>,
+) -> Result<(), String> {
     if window.label() != MAIN_WINDOW_LABEL {
         return Err("window mode can only be changed for the main window".to_string());
     }
@@ -1379,6 +1404,45 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn runtime_settings_create_and_restore_managed_workspace() {
+        let root =
+            std::env::temp_dir().join(format!("jarvs-runtime-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        super::ensure_runtime_settings(&root).unwrap();
+        let settings = std::fs::read(root.join("settings.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&settings).unwrap();
+        assert_eq!(
+            parsed["workspace_path"],
+            serde_json::json!(root.join("workspace"))
+        );
+        assert!(
+            root.join("workspace").is_dir(),
+            "fresh installs need a usable workspace"
+        );
+        std::fs::remove_dir(root.join("workspace")).unwrap();
+        super::ensure_runtime_settings(&root).unwrap();
+        assert!(
+            root.join("workspace").is_dir(),
+            "existing installs must recover the managed directory"
+        );
+        assert_eq!(std::fs::read(root.join("settings.json")).unwrap(), settings);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_settings_preserve_existing_custom_configuration() {
+        let root =
+            std::env::temp_dir().join(format!("jarvs-runtime-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let settings = br#"{"workspace_path":"custom-missing","execution_policy":"never"}"#;
+        std::fs::write(root.join("settings.json"), settings).unwrap();
+        super::ensure_runtime_settings(&root).unwrap();
+        assert_eq!(std::fs::read(root.join("settings.json")).unwrap(), settings);
+        assert!(!root.join("custom-missing").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn visible_window_is_hidden() {
         assert_eq!(toggle_action(true, false), ToggleAction::Hide);
     }
@@ -1413,7 +1477,10 @@ mod tests {
         assert_eq!(window_layout("compact", Some(10.0)).unwrap().height, 120.0);
         assert_eq!(window_layout("compact", Some(900.0)).unwrap().height, 420.0);
         assert!(window_layout("compact", Some(f64::NAN)).is_err());
-        assert_eq!(window_layout("expanded", Some(120.0)).unwrap().height, EXPANDED_WINDOW_HEIGHT);
+        assert_eq!(
+            window_layout("expanded", Some(120.0)).unwrap().height,
+            EXPANDED_WINDOW_HEIGHT
+        );
     }
 
     #[test]

@@ -855,6 +855,48 @@ def test_native_deny_all_never_calls_tool_or_model(tmp_path):
     assert adapter.requests == []
 
 
+@pytest.mark.parametrize("explicit_invocation", [False, True])
+def test_denial_is_durable_before_transport_stops_reading(tmp_path, explicit_invocation):
+    from core.agent.run_store import RunStore
+
+    store = RunStore(lambda: tmp_path / "audit.sqlite3")
+    adapter = FixtureAdapter([
+        [ModelStreamEvent(
+            tool_calls=(ModelToolCallDelta(
+                index=0, call_id="dispatch", name=ACTION_DISPATCH_PROVIDER_NAME,
+                arguments='{"profile":"inspect"}',
+            ),),
+            finish_reason="tool_calls",
+        )],
+        [ModelStreamEvent(
+            tool_calls=(ModelToolCallDelta(
+                index=0, call_id="read-missing-workspace", name="workspace__read_text",
+                arguments='{"path":"note.txt"}',
+            ),),
+            finish_reason="tool_calls",
+        )],
+    ])
+    native, settings = service(tmp_path, adapter, event_sinks=(store.append_event,))
+    settings.workspace.rmdir()
+    kwargs = {}
+    if explicit_invocation:
+        kwargs = {
+            "routing_signal": RoutingSignal(tool_name="workspace.read_text"),
+            "tool_invocation": ToolInvocation.create("workspace.read_text", {"path": "note.txt"}),
+        }
+    generation = native.start_generation("session", "denial", **kwargs)
+    stream = native.stream(generation, [{"role": "user", "content": "Read note.txt"}])
+    try:
+        for chunk in stream:
+            if chunk.get("type") == "execution_denied":
+                assert store.list_runs()[0].status == "failed"
+                break
+        else:
+            pytest.fail("Expected an execution denial")
+    finally:
+        stream.close()
+
+
 def test_reset_cancels_native_generation_and_clears_short_session(tmp_path):
     entered = threading.Event()
 

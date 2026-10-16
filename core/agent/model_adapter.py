@@ -263,6 +263,12 @@ class OpenAICompatibleAdapter:
                     raise ModelGenerationCancelled("The generation was cancelled.")
                 try:
                     raw_line = response.readline()
+                except (AttributeError, ValueError) as exc:
+                    # urllib may clear fp or close its buffer in the cancel
+                    # watcher while the reader is still unwinding.
+                    if cancelled.is_set():
+                        raise ModelGenerationCancelled("The generation was cancelled.") from exc
+                    raise
                 except (TimeoutError, socket.timeout):
                     if cancelled.is_set():
                         raise ModelGenerationCancelled("The generation was cancelled.")

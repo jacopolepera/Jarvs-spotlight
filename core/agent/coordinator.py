@@ -386,6 +386,9 @@ class RunCoordinator:
             if result.status is ToolStatus.CANCELLED:
                 raise ModelGenerationCancelled("The generation was cancelled.")
             if result.status is not ToolStatus.COMPLETED:
+                # The transport stops consuming at execution_denied. Persist
+                # the terminal state before publishing that boundary.
+                yield _activity(events.emit(EventType.RUN_FAILED, {"reason_code": result.reason_code or result.status.value}))
                 yield {
                     "role": "jarvs",
                     "type": "execution_denied",
@@ -394,7 +397,6 @@ class RunCoordinator:
                         "tool_name": result.tool_name,
                     },
                 }
-                yield _activity(events.emit(EventType.RUN_FAILED, {"reason_code": result.reason_code or result.status.value}))
                 return
 
             if not self._egress_allowed(provider, result):
@@ -765,6 +767,7 @@ class RunCoordinator:
                     )
                     continue
                 if result.status is not ToolStatus.COMPLETED:
+                    yield _activity(events.emit(EventType.RUN_FAILED, {"reason_code": result.reason_code or result.status.value}))
                     yield {
                         "role": "jarvs",
                         "type": "execution_denied",
@@ -773,7 +776,6 @@ class RunCoordinator:
                             "tool_name": result.tool_name,
                         },
                     }
-                    yield _activity(events.emit(EventType.RUN_FAILED, {"reason_code": result.reason_code or result.status.value}))
                     return
                 if not self._egress_allowed(provider, result):
                     text = self._local_only_result(provider, result)
@@ -896,14 +898,6 @@ class RunCoordinator:
 
         if result.status is ToolStatus.DENIED:
             reason_code = result.reason_code or result.status.value
-            yield {
-                "role": "jarvs",
-                "type": "execution_denied",
-                "content": {
-                    "reason_code": reason_code,
-                    "tool_name": result.tool_name,
-                },
-            }
             yield _activity(
                 events.emit(
                     EventType.RUN_FAILED,
@@ -914,6 +908,14 @@ class RunCoordinator:
                     },
                 )
             )
+            yield {
+                "role": "jarvs",
+                "type": "execution_denied",
+                "content": {
+                    "reason_code": reason_code,
+                    "tool_name": result.tool_name,
+                },
+            }
             return
         if result.status is ToolStatus.CANCELLED:
             yield _activity(

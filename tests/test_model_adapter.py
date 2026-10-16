@@ -134,7 +134,8 @@ def test_openai_compatible_transcript_fixture_streams_separate_channels(monkeypa
     assert response.closed
 
 
-def test_cancellation_closes_a_blocked_provider_stream(monkeypatch):
+@pytest.mark.parametrize("read_error", [None, AttributeError, ValueError])
+def test_cancellation_closes_a_blocked_provider_stream(monkeypatch, read_error):
     closed = threading.Event()
     entered = threading.Event()
 
@@ -144,6 +145,8 @@ def test_cancellation_closes_a_blocked_provider_stream(monkeypatch):
         def readline(self):
             entered.set()
             closed.wait(2)
+            if read_error is not None:
+                raise read_error("response was closed during readline")
             return b""
 
         def close(self):
@@ -181,6 +184,26 @@ def test_cancellation_closes_a_blocked_provider_stream(monkeypatch):
     assert not worker.is_alive()
     assert closed.is_set()
     assert errors and errors[0].code == "generation_cancelled"
+
+
+@pytest.mark.parametrize("read_error", [AttributeError, ValueError])
+def test_read_errors_without_stop_are_not_misclassified(monkeypatch, read_error):
+    class BrokenResponse(FakeResponse):
+        def readline(self):
+            raise read_error("provider read failed without cancellation")
+
+    response = BrokenResponse([])
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: response)
+    context = ProviderContext(
+        model_id="local", model="fixture", destination=ProviderDestination.LOCAL,
+        api_base="http://127.0.0.1:1234/v1", api_key="fixture",
+    )
+    with pytest.raises(read_error, match="without cancellation"):
+        list(OpenAICompatibleAdapter().stream(
+            context, ModelRequest(messages=[{"role": "user", "content": "wait"}]),
+            threading.Event(),
+        ))
+    assert response.closed
 
 
 def test_stop_interrupts_real_socket_read_without_waiting_for_provider_timeout():
